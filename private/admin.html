@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin - Sugardoll Clothing Shop</title>
+</head>
+<body>
+
+<h1>Admin</h1>
+<p><a href="/">Back to shop</a></p>
+<hr>
+
+<ul>
+  <li>Manage products</li>
+  <li>View sales reports</li>
+</ul>
+
+<h2>Users</h2>
+<table border="1" cellpadding="4">
+  <thead><tr><th>ID</th><th>Username</th><th>Role</th></tr></thead>
+  <tbody id="users"></tbody>
+</table>
+
+<script>
+// This data comes from a server route that only admins can use.
+fetch("/api/admin/users")
+  .then(res => res.json())
+  .then(users => {
+    const body = document.getElementById("users");
+    users.forEach(u => {
+      const row = document.createElement("tr");
+      [u.id, u.username, u.role].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+  });
+</script>
+
+</body>
+</html>

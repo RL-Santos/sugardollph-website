@@ -2,6 +2,7 @@ const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
 const Database = require("better-sqlite3");
+const path = require("path");
 
 const db = new Database("shop.db");
 const app = express();
@@ -49,6 +50,25 @@ function requireRole(role) {
 // Example admin-only route: customers get a 403 even if they type the URL
 app.get("/api/admin/users", requireRole("admin"), (req, res) => {
   res.json(db.prepare("SELECT id, username, role FROM users").all());
+});
+
+// Page version of the role check: sends people away instead of returning JSON
+function requirePageRole(role) {
+  return (req, res, next) => {
+    if (!req.session.user) return res.redirect("/");
+    if (req.session.user.role !== role) {
+      return res.status(403).send("Not allowed. <a href='/'>Back to shop</a>");
+    }
+    next();
+  };
+}
+
+app.get("/admin", requirePageRole("admin"), (req, res) => {
+  res.sendFile(path.join(__dirname, "private", "admin.html"));
+});
+
+app.get("/warehouse", requirePageRole("warehouse"), (req, res) => {
+  res.sendFile(path.join(__dirname, "private", "warehouse.html"));
 });
 
 app.listen(3000, () => console.log("Running at http://localhost:3000"));

@@ -23,7 +23,7 @@
   <p>
     Logged in as <b id="who"></b>
     <button onclick="doLogout()">Log out</button>
-    <button id="switch-btn" onclick="toggleView()" hidden></button>
+    <button id="switch-btn" onclick="goToRolePage()" hidden></button>
   </p>
   <hr>
 
@@ -37,29 +37,10 @@
     <h3>My orders</h3>
     <p>No orders yet.</p>
   </div>
-
-  <div id="admin-view" hidden>
-    <h2>Admin</h2>
-    <ul>
-      <li>Manage users</li>
-      <li>Manage products</li>
-      <li>View sales reports</li>
-    </ul>
-  </div>
-
-  <div id="warehouse-view" hidden>
-    <h2>Warehouse</h2>
-    <ul>
-      <li>Incoming stock</li>
-      <li>Orders to pack</li>
-      <li>Update inventory counts</li>
-    </ul>
-  </div>
 </div>
 
 <script>
 let currentUser = null;
-let inSpecialView = false;
 
 // Ask the server to check the login. Returns { username, role } or null.
 async function authenticate(username, password) {
@@ -85,39 +66,35 @@ async function doLogin() {
 
 function showApp(user) {
   currentUser = user;
-  inSpecialView = false;
   document.getElementById("error").textContent = "";
   document.getElementById("password").value = "";
   document.getElementById("login-page").hidden = true;
   document.getElementById("app-page").hidden = false;
   document.getElementById("who").textContent = user.username + " (" + user.role + ")";
-  render();
+
+  // Admins and warehouse staff get a button to their own page
+  const btn = document.getElementById("switch-btn");
+  if (user.role === "admin") {
+    btn.textContent = "Go to admin page";
+    btn.hidden = false;
+  } else if (user.role === "warehouse") {
+    btn.textContent = "Go to warehouse page";
+    btn.hidden = false;
+  } else {
+    btn.hidden = true;
+  }
 }
 
 async function doLogout() {
   await fetch("/api/logout", { method: "POST" });
   currentUser = null;
-  inSpecialView = false;
   document.getElementById("app-page").hidden = true;
   document.getElementById("login-page").hidden = false;
 }
 
-function toggleView() {
-  inSpecialView = !inSpecialView;
-  render();
-}
-
-function render() {
-  const role = currentUser.role;
-  const btn = document.getElementById("switch-btn");
-
-  btn.hidden = (role === "customer");
-  if (role === "admin") btn.textContent = inSpecialView ? "Switch to customer view" : "Switch to admin view";
-  if (role === "warehouse") btn.textContent = inSpecialView ? "Switch to customer view" : "Switch to warehouse view";
-
-  document.getElementById("customer-view").hidden = inSpecialView && role !== "customer";
-  document.getElementById("admin-view").hidden = !(inSpecialView && role === "admin");
-  document.getElementById("warehouse-view").hidden = !(inSpecialView && role === "warehouse");
+// Goes to /admin or /warehouse. The server checks the role again.
+function goToRolePage() {
+  window.location.href = "/" + currentUser.role;
 }
 
 // On page load: if the server still has a session, skip the login screen.
