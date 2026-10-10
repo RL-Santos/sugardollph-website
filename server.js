@@ -225,5 +225,71 @@ app.get("/api/products/:id", (req, res) => {
   res.json(p);
 });
 
+function cartUserId(req) {
+  const row = db.prepare("SELECT id FROM users WHERE username = ?").get(req.session.user.username);
+  return row && row.id;
+}
+
+// Reads the cart. Items that went out of stock are dropped, and quantities above the stock are lowered.
+function readCart(uid) {
+  db.prepare(
+    "DELETE FROM cart_items WHERE user_id = ? AND product_id IN (SELECT id FROM products WHERE amount <= 0)"
+  ).run(uid);
+  db.prepare(
+    `UPDATE cart_items
+     SET qty = (SELECT amount FROM products WHERE products.id = cart_items.product_id)
+     WHERE user_id = ?
+       AND qty > (SELECT amount FROM products WHERE products.id = cart_items.product_id)`
+  ).run(uid);
+  return db.prepare(
+    `SELECT p.id, p.name, p.price, p.amount AS max, c.qty,
+       (SELECT path FROM product_images WHERE product_id = p.id ORDER BY id LIMIT 1) AS image
+     FROM cart_items c JOIN products p ON p.id = c.product_id
+     WHERE c.user_id = ?
+     ORDER BY p.name`
+  ).all(uid);
+}
+
+app.get("/api/cart", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const uid = cartUserId(req);
+  if (!uid) return res.status(401).json({ error: "Not logged in" });
+  res.json(readCart(uid));
+});
+
+// Set the quantity of one product in the cart (0 or less removes it)
+app.put("/api/cart/:productId", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const uid = cartUserId(req);
+  if (!uid) return res.status(401).json({ error: "Not logged in" });
+
+  const productId = Number(req.params.productId);
+  const qty = Number(req.body.qty);
+  if (!Number.isInteger(qty)) return res.status(400).json({ error: "Invalid quantity" });
+
+  const product = db.prepare("SELECT id, amount FROM products WHERE id = ?").get(productId);
+  if (!product) return res.status(404).json({ error: "Product not found" });
+
+  if (qty <= 0) {
+    db.prepare("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?").run(uid, productId);
+  } else {
+    if (product.amount <= 0) return res.status(400).json({ error: "Out of stock" });
+    db.prepare(
+      `INSERT INTO cart_items (user_id, product_id, qty) VALUES (?, ?, ?)
+       ON CONFLICT(user_id, product_id) DO UPDATE SET qty = excluded.qty`
+    ).run(uid, productId, Math.min(qty, product.amount));
+  }
+  res.json(readCart(uid));
+});
+
+app.delete("/api/cart/:productId", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const uid = cartUserId(req);
+  if (!uid) return res.status(401).json({ error: "Not logged in" });
+  db.prepare("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?")
+    .run(uid, Number(req.params.productId));
+  res.json(readCart(uid));
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));

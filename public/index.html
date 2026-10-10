@@ -3,70 +3,85 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sugardoll Clothing Shop</title>
+<title>Sugardoll Clothings</title>
+<link rel="icon" type="image" href="images/SugardollIcon.jpg">
 <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
-
-<h1>Sugardoll Clothing Shop</h1>
+<body class="shop">
 
 <!-- LOGIN -->
-<div id="login-page">
-  <h2>Log in</h2>
-  <p>Username: <input type="text" id="username"></p>
-  <p>Password: <input type="password" id="password"></p>
-  <p><button id="login-btn">Log in</button></p>
-  <p>No account yet? <button id="show-register-btn">Create an account</button></p>
+<div id="login-page" class="split">
+  <div class="split-left">
+    <div class="auth-box">
+    <img class="logo" id="login-logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+      <h2>Log in to your account</h2>
+      <label class="field">Username
+        <input type="text" id="username" placeholder="Enter your username">
+      </label>
+      <label class="field">Password
+        <input type="password" id="password" placeholder="Enter your password">
+      </label>
+      <button id="login-btn" class="primary-btn">Log in</button>
+      <p id="error" class="form-error"></p>
+      <p>No account yet? <button id="show-register-btn" class="link-btn">Create an account</button></p>
+    </div>
+  </div>
+  <div class="split-right"></div>
 </div>
 
 <!-- CREATE ACCOUNT -->
-<div id="register-page" hidden>
-  <h2>Create an account</h2>
-  <p>Username: <input type="text" id="reg-username"></p>
-  <p>Password: <input type="password" id="reg-password"></p>
-  <p>Confirm password: <input type="password" id="reg-confirm"></p>
-  <p><small>Username: 3-30 letters, numbers or underscores.</small></p>
-  <p><small>Password must have:</small></p>
-  <ul>
-    <li><small>8 to 72 characters</small></li>
-    <li><small>At least 1 uppercase letter</small></li>
-    <li><small>At least 1 lowercase letter</small></li>
-    <li><small>At least 1 number</small></li>
-    <li><small>At least 1 symbol (like ! @ # $)</small></li>
-  </ul>
-  <p><button id="register-btn">Create account</button></p>
-  <p>Already have an account? <button id="back-to-login-btn">Back to log in</button></p>
+<div id="register-page" class="split" hidden>
+  <div class="split-left">
+    <div class="auth-box">
+      <h1>Sugardoll Clothings</h1>
+      <h2>Create an account</h2>
+      <label class="field">Username
+        <input type="text" id="reg-username" placeholder="Choose a username">
+      </label>
+      <label class="field">Password
+        <input type="password" id="reg-password" placeholder="Choose a password">
+      </label>
+      <label class="field">Confirm password
+        <input type="password" id="reg-confirm" placeholder="Type the password again">
+      </label>
+      <ul class="hint">
+        <li>Username: 3-30 letters, numbers or underscores</li>
+        <li>Password: 8 to 72 characters</li>
+        <li>At least 1 uppercase letter, 1 lowercase letter, 1 number and 1 symbol</li>
+      </ul>
+      <button id="register-btn" class="primary-btn">Create account</button>
+      <p id="register-error" class="form-error"></p>
+      <p>Already have an account? <button id="back-to-login-btn" class="link-btn">Back to log in</button></p>
+    </div>
+  </div>
+  <div class="split-right"></div>
 </div>
 
 <!-- LOGGED-IN AREA -->
 <div id="app-page" hidden>
-  <p>
+  <p class="userbar">
     Logged in as <b id="who"></b>
     <button id="logout-btn">Log out</button>
     <button id="switch-btn" hidden></button>
   </p>
-  <hr>
 
-  <div id="customer-view">
-    <h2>Shop</h2>
-    <p>
-      Search: <input type="text" id="search" placeholder="Search products">
-      Category:
-      <select id="category">
-        <option value="">All</option>
-        <option value="jeans">Jeans</option>
-        <option value="trousers">Trousers</option>
-        <option value="tops">Tops</option>
-        <option value="others">Others</option>
-      </select>
-    </p>
-    <div id="product-list" class="product-grid"></div>
-
-    <h2>My cart</h2>
-    <div id="cart"></div>
+  <div class="topbar">
+    <img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+    <input type="text" id="search" placeholder="Search products">
+    <select id="category">
+      <option value="">All</option>
+      <option value="jeans">Jeans</option>
+      <option value="trousers">Trousers</option>
+      <option value="tops">Tops</option>
+      <option value="others">Others</option>
+    </select>
+    <button id="cart-btn" class="cart-btn">Cart (<span id="cart-count">0</span>)</button>
   </div>
 
-  <!-- PRODUCT PAGE (new) -->
+  <div id="customer-view">
+    <div id="product-list" class="product-grid"></div>
+  </div>
+
   <div id="product-page" hidden>
     <p><button id="back-btn">&larr; Back to shop</button></p>
     <div id="gallery">
@@ -80,6 +95,27 @@
     <p id="product-stock"></p>
     <p><b id="product-price"></b></p>
     <button id="detail-add-btn">Add to cart</button>
+  </div>
+  
+  <!-- CART (slides in from the right) -->
+  <div id="cart-overlay" hidden>
+    <div id="cart-panel">
+      <p class="cart-head"><b>My cart</b> <button id="cart-close-btn">Close</button></p>
+      <div id="cart"></div>
+      <div id="cart-footer" hidden>
+        <b id="cart-total"></b>
+        <button id="checkout-btn" class="primary-btn">Checkout</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- REMOVE CONFIRMATION -->
+  <div id="confirm-overlay" hidden>
+    <div id="confirm-box">
+      <p id="confirm-text"></p>
+      <button id="confirm-no">Cancel</button>
+      <button id="confirm-yes" class="primary-btn">Remove</button>
+    </div>
   </div>
 </div>
 

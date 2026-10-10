@@ -1,7 +1,7 @@
 const Database = require("better-sqlite3");
 const bcrypt = require("bcrypt");
 
-const db = new Database("shop.db"); // creates the file if it doesn't exist
+const db = new Database("shop.db");
 
 // ---------- TABLES ----------
 
@@ -26,6 +26,13 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     path TEXT NOT NULL
+  );
+  
+  CREATE TABLE IF NOT EXISTS cart_items (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    PRIMARY KEY (user_id, product_id)
   );
 `);
 

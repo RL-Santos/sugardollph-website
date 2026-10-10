@@ -31,7 +31,7 @@ async function doLogin() {
     document.getElementById("password").value
   );
   if (!user) {
-    showToast("Wrong username or password.", "error");
+        document.getElementById("error").textContent = "Wrong username or password.";
     return;
   }
   showApp(user);
@@ -39,6 +39,7 @@ async function doLogin() {
 
 function showApp(user) {
   currentUser = user;
+  document.getElementById("error").textContent = "";
   document.getElementById("password").value = "";
   document.getElementById("login-page").hidden = true;
   document.getElementById("register-page").hidden = true;
@@ -68,6 +69,7 @@ async function doLogout() {
   cart = [];
   document.getElementById("app-page").hidden = true;
   document.getElementById("login-page").hidden = false;
+  document.getElementById("cart-overlay").hidden = true;
 }
 
 function goToRolePage() {
@@ -170,88 +172,149 @@ function closeProduct() {
   document.getElementById("customer-view").hidden = false;
   loadProducts(); // refresh stock numbers
 }
-
 // ---------- CART ----------
 
-function addToCart(p) {
-  const item = cart.find(i => i.id === p.id);
-  if (item) {
-    if (item.qty < item.max) item.qty++;
-  } else {
-    cart.push({ id: p.id, name: p.name, price: p.price, qty: 1, max: p.amount });
+async function loadCart() {
+  const res = await fetch("/api/cart");
+  if (res.ok) cart = await res.json();
+  renderCart();
+}
+
+async function saveQty(id, qty) {
+  const res = await fetch("/api/cart/" + id, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ qty })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showToast(data.error, "error");
+    return false;
   }
+  cart = data;
   renderCart();
+  return true;
 }
 
-function changeQty(id, change) {
-  const item = cart.find(i => i.id === id);
-  if (!item) return;
-  item.qty = Math.min(item.qty + change, item.max);
-  if (item.qty <= 0) cart = cart.filter(i => i.id !== id);
-  renderCart();
+async function addToCart(p) {
+  const item = cart.find(i => i.id === p.id);
+  if (item && item.qty >= item.max) {
+    showToast("No more stock available.", "error");
+    return false;
+  }
+  return saveQty(p.id, item ? item.qty + 1 : 1);
 }
 
-function removeItem(id) {
-  cart = cart.filter(i => i.id !== id);
-  renderCart();
+function changeQty(item, change) {
+  const newQty = item.qty + change;
+  if (newQty <= 0) return askRemove(item);
+  if (newQty > item.max) {
+    showToast("No more stock available.", "error");
+    return;
+  }
+  saveQty(item.id, newQty);
+}
+
+// Shows the "are you sure" popup
+function confirmRemove(name) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById("confirm-overlay");
+    const yes = document.getElementById("confirm-yes");
+    const no = document.getElementById("confirm-no");
+    document.getElementById("confirm-text").textContent =
+      'Remove "' + name + '" from your cart?';
+    overlay.hidden = false;
+    const finish = answer => {
+      overlay.hidden = true;
+      yes.onclick = null;
+      no.onclick = null;
+      resolve(answer);
+    };
+    yes.onclick = () => finish(true);
+    no.onclick = () => finish(false);
+  });
+}
+
+async function askRemove(item) {
+  if (!(await confirmRemove(item.name))) return;
+  const res = await fetch("/api/cart/" + item.id, { method: "DELETE" });
+  if (res.ok) {
+    cart = await res.json();
+    renderCart();
+  }
 }
 
 function renderCart() {
+  document.getElementById("cart-count").textContent = cart.reduce((n, i) => n + i.qty, 0);
+
   const box = document.getElementById("cart");
+  const footer = document.getElementById("cart-footer");
   box.innerHTML = "";
+
   if (cart.length === 0) {
     box.textContent = "Your cart is empty.";
+    footer.hidden = true;
     return;
   }
 
-  const table = document.createElement("table");
-  table.border = "1";
-  table.cellPadding = "4";
-
-  const head = table.insertRow();
-  ["Product", "Price", "Qty", "Subtotal", ""].forEach(t => {
-    const th = document.createElement("th");
-    th.textContent = t;
-    head.appendChild(th);
-  });
-
   let total = 0;
   cart.forEach(item => {
-    const subtotal = item.price * item.qty;
-    total += subtotal;
+    total += item.price * item.qty;
 
-    const row = table.insertRow();
-    row.insertCell().textContent = item.name;
-    row.insertCell().textContent = "PHP " + item.price;
+    const card = document.createElement("div");
+    card.className = "cart-item";
 
-    const qtyCell = row.insertCell();
+    const remove = document.createElement("button");
+    remove.className = "cart-remove";
+    remove.textContent = "\u2715";
+    remove.title = "Remove";
+    remove.onclick = () => askRemove(item);
+
+    let thumb;
+    if (item.image) {
+      thumb = document.createElement("img");
+      thumb.src = item.image;
+      thumb.alt = item.name;
+    } else {
+      thumb = document.createElement("div");
+    }
+    thumb.className = "cart-thumb";
+
+    const info = document.createElement("div");
+    info.className = "cart-info";
+
+    const name = document.createElement("b");
+    name.textContent = item.name;
+
+    const price = document.createElement("span");
+    price.textContent = "PHP " + item.price;
+
+    const qty = document.createElement("div");
+    qty.className = "cart-qty";
     const minus = document.createElement("button");
     minus.textContent = "-";
-    minus.onclick = () => changeQty(item.id, -1);
+    minus.onclick = () => changeQty(item, -1);
+    const amount = document.createElement("span");
+    amount.textContent = item.qty;
     const plus = document.createElement("button");
     plus.textContent = "+";
-    plus.onclick = () => changeQty(item.id, 1);
-    qtyCell.append(minus, " " + item.qty + " ", plus);
+    plus.onclick = () => changeQty(item, 1);
+    qty.append(minus, amount, plus);
 
-    row.insertCell().textContent = "PHP " + subtotal.toFixed(2);
-
-    const removeBtn = document.createElement("button");
-    removeBtn.textContent = "Remove";
-    removeBtn.onclick = () => removeItem(item.id);
-    row.insertCell().appendChild(removeBtn);
+    info.append(name, price, qty);
+    card.append(remove, thumb, info);
+    box.appendChild(card);
   });
 
-  box.appendChild(table);
-  const totalLine = document.createElement("p");
-  const b = document.createElement("b");
-  b.textContent = "Total: PHP " + total.toFixed(2);
-  totalLine.appendChild(b);
-  box.appendChild(totalLine);
+  document.getElementById("cart-total").textContent = "Total: PHP " + total.toFixed(2);
+  footer.hidden = false;
 }
 
 // ---------- CREATE ACCOUNT ----------
 
 function showRegister(show) {
+  document.getElementById("error").textContent = "";
+  document.getElementById("register-error").textContent = "";
   document.getElementById("login-page").hidden = show;
   document.getElementById("register-page").hidden = !show;
 }
@@ -271,15 +334,16 @@ async function doRegister() {
   const username = document.getElementById("reg-username").value.trim();
   const password = document.getElementById("reg-password").value;
   const confirm = document.getElementById("reg-confirm").value;
+  const error = document.getElementById("register-error");
   const problem = checkPassword(password);
-  
+
   if (problem) {
-    showToast(problem, "error");
+    error.textContent = problem;
     return;
   }
 
   if (password !== confirm) {
-    showToast("Passwords don't match.", "error");
+    error.textContent = "Passwords don't match.";
     return;
   }
 
@@ -290,14 +354,15 @@ async function doRegister() {
   });
   const data = await res.json();
   if (!res.ok) {
-    showToast(data.error, "error");
+    error.textContent = data.error;
     return;
   }
 
+  error.textContent = "";
   document.getElementById("reg-username").value = "";
   document.getElementById("reg-password").value = "";
   document.getElementById("reg-confirm").value = "";
-  showApp(data); // logged in right after signing up
+  showApp(data);
 }
 
 // ---------- BUTTONS ----------
@@ -305,17 +370,24 @@ async function doRegister() {
 document.getElementById("login-btn").addEventListener("click", doLogin);
 document.getElementById("logout-btn").addEventListener("click", doLogout);
 document.getElementById("switch-btn").addEventListener("click", goToRolePage);
-document.getElementById("search").addEventListener("input", loadProducts);
-document.getElementById("category").addEventListener("change", loadProducts);
+document.getElementById("search").addEventListener("input", closeProduct);
+document.getElementById("category").addEventListener("change", closeProduct);
 document.getElementById("show-register-btn").addEventListener("click", () => showRegister(true));
 document.getElementById("back-to-login-btn").addEventListener("click", () => showRegister(false));
 document.getElementById("register-btn").addEventListener("click", doRegister);
 document.getElementById("back-btn").addEventListener("click", closeProduct);
 document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
 document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
-document.getElementById("detail-add-btn").addEventListener("click", () => {
-  addToCart(currentProduct);
-  showToast("Added to cart.", "success");
+document.getElementById("detail-add-btn").addEventListener("click", async () => {
+  if (await addToCart(currentProduct)) showToast("Added to cart.", "success");
+});
+
+// Cart overlay
+const cartOverlay = document.getElementById("cart-overlay");
+document.getElementById("cart-btn").addEventListener("click", () => { cartOverlay.hidden = false; });
+document.getElementById("cart-close-btn").addEventListener("click", () => { cartOverlay.hidden = true; });
+cartOverlay.addEventListener("click", e => {
+  if (e.target === cartOverlay) cartOverlay.hidden = true;
 });
 
 // Pressing Enter in the password box also logs in
