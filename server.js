@@ -3,13 +3,33 @@ const session = require("express-session");
 const bcrypt = require("bcrypt");
 const Database = require("better-sqlite3");
 const path = require("path");
+const fs = require("fs");
+
+const multer = require("multer");
+const crypto = require("crypto");
+
+const IMAGE_DIR = path.join(__dirname, "public", "images");
+fs.mkdirSync(IMAGE_DIR, { recursive: true });
+
+const EXT = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: IMAGE_DIR,
+    filename: (req, file, cb) => cb(null, crypto.randomBytes(12).toString("hex") + EXT[file.mimetype])
+  }),
+  fileFilter: (req, file, cb) => cb(null, file.mimetype in EXT),
+  limits: { fileSize: 5 * 1024 * 1024, files: 10 }
+});
+
+const ROLES = ["customer", "admin", "warehouse"];
 
 const db = new Database("shop.db");
 const app = express();
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use(session({
-  secret: "change-this-to-a-long-random-string",
+  secret: process.env.SESSION_SECRET || "dev-only-secret",
   resave: false,
   saveUninitialized: false,
   cookie: { httpOnly: true, sameSite: "lax" }
@@ -80,11 +100,6 @@ function requireRole(role) {
   };
 }
 
-// Example admin-only route: customers get a 403 even if they type the URL
-app.get("/api/admin/users", requireRole("admin"), (req, res) => {
-  res.json(db.prepare("SELECT id, username, role FROM users").all());
-});
-
 // Page version of the role check: sends people away instead of returning JSON
 function requirePageRole(role) {
   return (req, res, next) => {
@@ -96,8 +111,82 @@ function requirePageRole(role) {
   };
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Admin page: the server fills in the users table, so the HTML needs no JS
 app.get("/admin", requirePageRole("admin"), (req, res) => {
-  res.sendFile(path.join(__dirname, "private", "admin.html"));
+  const users = db.prepare("SELECT id, username, role FROM users").all();
+
+  const rows = users.map(u => {
+    let action;
+    if (u.username === req.session.user.username) {
+      action = "(you)";
+    } else {
+      const options = ROLES.map(r =>
+        `<option value="${r}"${r === u.role ? " selected" : ""}>${r}</option>`).join("");
+      action = `<form method="POST" action="/admin/users/${u.id}/role">
+        <select name="role">${options}</select> <button type="submit">Save</button>
+      </form>`;
+    }
+    return `<tr><td>${u.id}</td><td>${escapeHtml(u.username)}</td><td>${u.role}</td><td>${action}</td></tr>`;
+  }).join("");
+
+  const flash = req.session.flash;
+  delete req.session.flash;
+  const toast = flash
+    ? `<div class="toast ${flash.type}">${escapeHtml(flash.text)}</div>`
+    : "";
+  
+  const productOptions = db.prepare("SELECT id, name FROM products ORDER BY name").all()
+    .map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+
+  const page = fs.readFileSync(path.join(__dirname, "private", "admin.html"), "utf8")
+    .replace("<!--TOAST-->", () => toast)
+    .replace("<!--USERS-->", () => rows)
+    .replace("<!--PRODUCTS-->", () => productOptions);
+  res.send(page);
+});
+
+// Upload one or more pictures for a product (admin only; role is checked before any file is saved)
+app.post("/admin/products/images", requirePageRole("admin"), (req, res) => {
+  upload.array("images", 10)(req, res, err => {
+    const files = req.files || [];
+    const product = db.prepare("SELECT id, name FROM products WHERE id = ?")
+      .get(Number(req.body && req.body.product));
+
+    if (err) {
+      req.session.flash = { text: "Upload failed: each picture must be 5 MB or less, max 10 at a time.", type: "error" };
+    } else if (!product) {
+      files.forEach(f => fs.unlink(f.path, () => {}));
+      req.session.flash = { text: "Product not found.", type: "error" };
+    } else if (files.length === 0) {
+      req.session.flash = { text: "No valid pictures chosen (JPG, PNG or WEBP only).", type: "error" };
+    } else {
+      const add = db.prepare("INSERT INTO product_images (product_id, path) VALUES (?, ?)");
+      files.forEach(f => add.run(product.id, "/images/" + f.filename));
+      req.session.flash = { text: files.length + " picture(s) added to " + product.name + ".", type: "success" };
+    }
+    res.redirect("/admin");
+  });
+});
+
+// Change another account's role (admin only)
+app.post("/admin/users/:id/role", requirePageRole("admin"), (req, res) => {
+  const id = Number(req.params.id);
+  const role = String(req.body.role || "");
+  const target = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id);
+
+  if (!ROLES.includes(role)) req.session.flash = { text: "Unknown role.", type: "error" };
+  else if (!target) req.session.flash = { text: "User not found.", type: "error" };
+  else if (target.username === req.session.user.username) req.session.flash = { text: "You can't change your own role.", type: "error" };
+  else {
+    db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+    req.session.flash = { text: target.username + " is now " + role + ".", type: "success" };
+  }
+  res.redirect("/admin");
 });
 
 app.get("/warehouse", requirePageRole("warehouse"), (req, res) => {
@@ -115,7 +204,8 @@ app.get("/api/products", (req, res) => {
     return res.status(400).json({ error: "Unknown category" });
   }
   const rows = db.prepare(
-    `SELECT id, name, description, price, amount, category
+    `SELECT id, name, description, price, amount, category,
+       (SELECT path FROM product_images WHERE product_id = products.id ORDER BY id LIMIT 1) AS image
      FROM products
      WHERE name LIKE ? AND (? = '' OR category = ?)
      ORDER BY name`
@@ -123,4 +213,17 @@ app.get("/api/products", (req, res) => {
   res.json(rows);
 });
 
-app.listen(3000, () => console.log("Running at http://localhost:3000"));
+// One product with all its pictures
+app.get("/api/products/:id", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const p = db.prepare(
+    "SELECT id, name, description, price, amount, category FROM products WHERE id = ?"
+  ).get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  p.images = db.prepare("SELECT path FROM product_images WHERE product_id = ? ORDER BY id")
+    .all(p.id).map(r => r.path);
+  res.json(p);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));

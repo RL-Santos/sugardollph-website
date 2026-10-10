@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sugardoll Clothing Shop</title>
+<link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
 
@@ -15,7 +16,6 @@
   <p>Username: <input type="text" id="username"></p>
   <p>Password: <input type="password" id="password"></p>
   <p><button id="login-btn">Log in</button></p>
-  <p id="error"></p>
   <p>No account yet? <button id="show-register-btn">Create an account</button></p>
 </div>
 
@@ -35,7 +35,6 @@
     <li><small>At least 1 symbol (like ! @ # $)</small></li>
   </ul>
   <p><button id="register-btn">Create account</button></p>
-  <p id="register-error"></p>
   <p>Already have an account? <button id="back-to-login-btn">Back to log in</button></p>
 </div>
 
@@ -61,10 +60,26 @@
         <option value="others">Others</option>
       </select>
     </p>
-    <ul id="product-list"></ul>
+    <div id="product-list" class="product-grid"></div>
 
     <h2>My cart</h2>
     <div id="cart"></div>
+  </div>
+
+  <!-- PRODUCT PAGE (new) -->
+  <div id="product-page" hidden>
+    <p><button id="back-btn">&larr; Back to shop</button></p>
+    <div id="gallery">
+      <button id="prev-btn">&lt;</button>
+      <img id="product-img" alt="">
+      <button id="next-btn">&gt;</button>
+    </div>
+    <p id="img-count"></p>
+    <h2 id="product-title"></h2>
+    <p id="product-desc"></p>
+    <p id="product-stock"></p>
+    <p><b id="product-price"></b></p>
+    <button id="detail-add-btn">Add to cart</button>
   </div>
 </div>
 

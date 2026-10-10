@@ -21,6 +21,12 @@ db.exec(`
     amount INTEGER NOT NULL DEFAULT 0,
     category TEXT NOT NULL CHECK (category IN ('jeans', 'trousers', 'tops', 'others'))
   );
+
+  CREATE TABLE IF NOT EXISTS product_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    path TEXT NOT NULL
+  );
 `);
 
 // ---------- USERS ----------

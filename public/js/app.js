@@ -1,6 +1,18 @@
 let currentUser = null;
 let products = [];  // results from the server
 let cart = [];      // { id, name, price, qty, max }
+let currentProduct = null;
+let images = [];
+let imgIndex = 0;
+
+// Shows a popup in the bottom right corner for a few seconds
+function showToast(text, type) {
+  const toast = document.createElement("div");
+  toast.className = "toast " + (type || "");
+  toast.textContent = text;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
 
 // ---------- LOGIN ----------
 
@@ -19,7 +31,7 @@ async function doLogin() {
     document.getElementById("password").value
   );
   if (!user) {
-    document.getElementById("error").textContent = "Wrong username or password.";
+    showToast("Wrong username or password.", "error");
     return;
   }
   showApp(user);
@@ -27,12 +39,13 @@ async function doLogin() {
 
 function showApp(user) {
   currentUser = user;
-  document.getElementById("error").textContent = "";
   document.getElementById("password").value = "";
   document.getElementById("login-page").hidden = true;
   document.getElementById("register-page").hidden = true;
   document.getElementById("app-page").hidden = false;
   document.getElementById("who").textContent = user.username + " (" + user.role + ")";
+  document.getElementById("customer-view").hidden = false;
+  document.getElementById("product-page").hidden = true;
 
   const btn = document.getElementById("switch-btn");
   if (user.role === "admin") {
@@ -79,22 +92,83 @@ function renderProducts() {
   const list = document.getElementById("product-list");
   list.innerHTML = "";
   if (products.length === 0) {
-    const li = document.createElement("li");
-    li.textContent = "No products found.";
-    list.appendChild(li);
+    list.textContent = "No products found.";
     return;
   }
   products.forEach(p => {
-    const li = document.createElement("li");
-    li.textContent = p.name + " - PHP " + p.price + " - " + p.description +
-                     " (" + p.amount + " in stock) ";
-    const btn = document.createElement("button");
-    btn.textContent = p.amount > 0 ? "Add to cart" : "Out of stock";
-    btn.disabled = p.amount <= 0;
-    btn.onclick = () => addToCart(p);
-    li.appendChild(btn);
-    list.appendChild(li);
+    const card = document.createElement("button");
+    card.className = "product-card";
+
+    if (p.image) {
+      const img = document.createElement("img");
+      img.src = p.image;
+      img.alt = p.name;
+      card.appendChild(img);
+    } else {
+      const none = document.createElement("div");
+      none.className = "no-image";
+      none.textContent = "No image";
+      card.appendChild(none);
+    }
+
+    const title = document.createElement("b");
+    title.textContent = p.name;
+    const price = document.createElement("span");
+    price.textContent = "PHP " + p.price;
+    card.append(title, price);
+
+    card.onclick = () => openProduct(p.id);
+    list.appendChild(card);
   });
+}
+
+// ---------- PRODUCT PAGE ----------
+
+async function openProduct(id) {
+  const res = await fetch("/api/products/" + id);
+  if (!res.ok) return;
+  currentProduct = await res.json();
+  images = currentProduct.images;
+  imgIndex = 0;
+
+  document.getElementById("product-title").textContent = currentProduct.name;
+  document.getElementById("product-desc").textContent = currentProduct.description;
+  document.getElementById("product-stock").textContent = "Stock: " + currentProduct.amount;
+  document.getElementById("product-price").textContent = "PHP " + currentProduct.price;
+
+  const addBtn = document.getElementById("detail-add-btn");
+  addBtn.disabled = currentProduct.amount <= 0;
+  addBtn.textContent = currentProduct.amount > 0 ? "Add to cart" : "Out of stock";
+
+  renderImage();
+  document.getElementById("customer-view").hidden = true;
+  document.getElementById("product-page").hidden = false;
+}
+
+function renderImage() {
+  const img = document.getElementById("product-img");
+  const many = images.length > 1;
+  img.hidden = images.length === 0;
+  document.getElementById("prev-btn").hidden = !many;
+  document.getElementById("next-btn").hidden = !many;
+  document.getElementById("img-count").textContent =
+    images.length ? (imgIndex + 1) + " / " + images.length : "No pictures yet";
+  if (images.length) {
+    img.src = images[imgIndex];
+    img.alt = currentProduct.name;
+  }
+}
+
+// Wraps around: after the last picture comes the first, and before the first comes the last
+function changeImage(step) {
+  imgIndex = (imgIndex + step + images.length) % images.length;
+  renderImage();
+}
+
+function closeProduct() {
+  document.getElementById("product-page").hidden = true;
+  document.getElementById("customer-view").hidden = false;
+  loadProducts(); // refresh stock numbers
 }
 
 // ---------- CART ----------
@@ -197,16 +271,15 @@ async function doRegister() {
   const username = document.getElementById("reg-username").value.trim();
   const password = document.getElementById("reg-password").value;
   const confirm = document.getElementById("reg-confirm").value;
-  const error = document.getElementById("register-error");
   const problem = checkPassword(password);
   
   if (problem) {
-    error.textContent = problem;
+    showToast(problem, "error");
     return;
   }
 
   if (password !== confirm) {
-    error.textContent = "Passwords don't match.";
+    showToast("Passwords don't match.", "error");
     return;
   }
 
@@ -217,11 +290,10 @@ async function doRegister() {
   });
   const data = await res.json();
   if (!res.ok) {
-    error.textContent = data.error;
+    showToast(data.error, "error");
     return;
   }
 
-  error.textContent = "";
   document.getElementById("reg-username").value = "";
   document.getElementById("reg-password").value = "";
   document.getElementById("reg-confirm").value = "";
@@ -238,6 +310,13 @@ document.getElementById("category").addEventListener("change", loadProducts);
 document.getElementById("show-register-btn").addEventListener("click", () => showRegister(true));
 document.getElementById("back-to-login-btn").addEventListener("click", () => showRegister(false));
 document.getElementById("register-btn").addEventListener("click", doRegister);
+document.getElementById("back-btn").addEventListener("click", closeProduct);
+document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
+document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
+document.getElementById("detail-add-btn").addEventListener("click", () => {
+  addToCart(currentProduct);
+  showToast("Added to cart.", "success");
+});
 
 // Pressing Enter in the password box also logs in
 document.getElementById("password").addEventListener("keydown", e => {

@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Admin - Sugardoll Clothing Shop</title>
+<link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
 
@@ -17,28 +18,24 @@
 </ul>
 
 <h2>Users</h2>
+<p><!--TOAST--></p>
 <table border="1" cellpadding="4">
-  <thead><tr><th>ID</th><th>Username</th><th>Role</th></tr></thead>
-  <tbody id="users"></tbody>
+  <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Change role</th></tr></thead>
+  <tbody>
+<!--USERS-->
+  </tbody>
 </table>
 
-<script>
-// This data comes from a server route that only admins can use.
-fetch("/api/admin/users")
-  .then(res => res.json())
-  .then(users => {
-    const body = document.getElementById("users");
-    users.forEach(u => {
-      const row = document.createElement("tr");
-      [u.id, u.username, u.role].forEach(value => {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.appendChild(cell);
-      });
-      body.appendChild(row);
-    });
-  });
-</script>
+<h2>Product pictures</h2>
+<form method="POST" action="/admin/products/images" enctype="multipart/form-data">
+  <p>
+    Product: <select name="product"><!--PRODUCTS--></select>
+  </p>
+  <p>
+    <input type="file" name="images" accept="image/jpeg,image/png,image/webp" multiple required>
+  </p>
+  <p><button type="submit">Upload pictures</button></p>
+</form>
 
 </body>
 </html>
