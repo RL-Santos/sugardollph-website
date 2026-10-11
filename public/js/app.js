@@ -131,14 +131,30 @@ function renderProducts() {
       card.appendChild(none);
     }
 
-    const title = document.createElement("b");
-    title.textContent = p.name;
-    const price = document.createElement("span");
-    price.textContent = "PHP " + p.price;
-    card.append(title, price);
+    const label = document.createElement("div");
+    label.className = "product-name";
+    const marquee = document.createElement("div");
+    marquee.className = "marquee";
+    const text = document.createElement("span");
+    text.textContent = p.name;
+    marquee.appendChild(text);
+    label.appendChild(marquee);
+    card.appendChild(label);
 
     card.onclick = () => navigate("/product/" + p.slug);
     list.appendChild(card);
+  });
+
+  // Measure once the cards are in the page, then scroll only names that don't fit
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".marquee").forEach(m => {
+      const span = m.firstChild;
+      const overflow = span.offsetWidth - m.clientWidth;
+      if (overflow > 0) {
+        span.style.setProperty("--shift", -overflow + "px");
+        span.classList.add("scroll");
+      }
+    });
   });
 }
 

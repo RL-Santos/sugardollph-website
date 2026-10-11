@@ -87,20 +87,30 @@
     <div id="product-list" class="product-grid"></div>
   </div>
 
-  <div id="product-page" hidden>
-    <p><button id="back-btn">&larr; Back to shop</button></p>
-    <div id="gallery">
-      <button id="prev-btn">&lt;</button>
-      <img id="product-img" alt="">
-      <button id="next-btn">&gt;</button>
+<div id="product-page" hidden>
+  <div class="product-layout">
+    <button id="back-btn" aria-label="Back to shop">&lsaquo;</button>
+    <div class="product-media">
+      <div id="gallery">
+        <button id="prev-btn" aria-label="Previous picture">&lt;</button>
+        <img id="product-img" alt="">
+        <button id="next-btn" aria-label="Next picture">&gt;</button>
+      </div>
+      <p id="img-count"></p>
     </div>
-    <p id="img-count"></p>
-    <h2 id="product-title"></h2>
-    <p id="product-desc"></p>
-    <p id="product-stock"></p>
-    <p><b id="product-price"></b></p>
-    <button id="detail-add-btn">Add to cart</button>
+
+    <div class="product-info">
+      <h2 id="product-title"></h2>
+      <p class="product-meta">
+        <b id="product-price"></b>
+        <span class="divider">|</span>
+        <span id="product-stock"></span>
+      </p>
+      <p id="product-desc"></p>
+      <button id="detail-add-btn" class="primary-btn">Add to cart</button>
+    </div>
   </div>
+</div>
   
   <!-- CART (slides in from the right) -->
   <div id="cart-overlay" hidden>
