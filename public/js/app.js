@@ -1,9 +1,10 @@
 let currentUser = null;
-let products = [];  // results from the server
+let products = []; 
 let cart = [];      // { id, name, price, qty, max }
 let currentProduct = null;
 let images = [];
 let imgIndex = 0;
+let returnTo = "/"; // where to go after logging in
 
 // Shows a popup in the bottom right corner for a few seconds
 function showToast(text, type) {
@@ -34,19 +35,30 @@ async function doLogin() {
         document.getElementById("error").textContent = "Wrong username or password.";
     return;
   }
-  showApp(user);
+  finishAuth(user);
 }
 
-function showApp(user) {
+function goToRolePage() {
+  window.location.href = "/" + currentUser.role;
+}
+
+// ---------- WHO IS LOGGED IN ----------
+
+function applyUser(user) {
   currentUser = user;
-  document.getElementById("error").textContent = "";
+  document.getElementById("guest-bar").hidden = !!user;
+  document.getElementById("user-bar").hidden = !user;
+  document.getElementById("cart-btn").hidden = !user;
+
+  if (!user) {
+    cart = [];
+    document.getElementById("cart-overlay").hidden = true;
+    renderCart();
+    return;
+  }
+
   document.getElementById("password").value = "";
-  document.getElementById("login-page").hidden = true;
-  document.getElementById("register-page").hidden = true;
-  document.getElementById("app-page").hidden = false;
   document.getElementById("who").textContent = user.username + " (" + user.role + ")";
-  document.getElementById("customer-view").hidden = false;
-  document.getElementById("product-page").hidden = true;
 
   const btn = document.getElementById("switch-btn");
   if (user.role === "admin") {
@@ -58,22 +70,28 @@ function showApp(user) {
   } else {
     btn.hidden = true;
   }
+  loadCart();
+}
 
-  loadProducts();
-  renderCart();
+// Sends a guest to the login page and remembers where they were
+function goLogin() {
+  if (location.pathname !== "/login" && location.pathname !== "/register") {
+    returnTo = location.pathname + location.search;
+  }
+  navigate("/login");
+}
+
+function finishAuth(user) {
+  applyUser(user);
+  history.replaceState({ app: true }, "", returnTo);
+  returnTo = "/";
+  route();
 }
 
 async function doLogout() {
   await fetch("/api/logout", { method: "POST" });
-  currentUser = null;
-  cart = [];
-  document.getElementById("app-page").hidden = true;
-  document.getElementById("login-page").hidden = false;
-  document.getElementById("cart-overlay").hidden = true;
-}
-
-function goToRolePage() {
-  window.location.href = "/" + currentUser.role;
+  applyUser(null);
+  route();
 }
 
 // ---------- PRODUCTS + SEARCH ----------
@@ -119,16 +137,72 @@ function renderProducts() {
     price.textContent = "PHP " + p.price;
     card.append(title, price);
 
-    card.onclick = () => openProduct(p.id);
+    card.onclick = () => navigate("/product/" + p.slug);
     list.appendChild(card);
   });
 }
 
-// ---------- PRODUCT PAGE ----------
+// ---------- PAGES + LINKS ----------
 
-async function openProduct(id) {
-  const res = await fetch("/api/products/" + id);
-  if (!res.ok) return;
+// Moves to a new link without reloading the page
+function navigate(url) {
+  history.pushState({ app: true }, "", url);
+  route();
+}
+
+// Looks at the current link and shows the matching page
+function route() {
+  const path = location.pathname;
+  const onAuthPage = path === "/login" || path === "/register";
+
+  // Logged-in people have no reason to see the login page
+  if (onAuthPage && currentUser) {
+    history.replaceState({ app: true }, "", "/");
+    return route();
+  }
+
+  document.getElementById("login-page").hidden = path !== "/login";
+  document.getElementById("register-page").hidden = path !== "/register";
+  document.getElementById("app-page").hidden = onAuthPage;
+  if (onAuthPage) {
+    document.getElementById("error").textContent = "";
+    document.getElementById("register-error").textContent = "";
+    return;
+  }
+
+  const params = new URLSearchParams(location.search);
+  const match = path.match(/^\/product\/([^/]+)$/);
+  if (match) {
+    showProductPage(decodeURIComponent(match[1]).toLowerCase());
+    return;
+  }
+
+  const isSearch = path === "/search";
+  document.getElementById("search").value = isSearch ? (params.get("q") || "") : "";
+  document.getElementById("category").value = isSearch ? (params.get("category") || "") : "";
+  document.getElementById("product-page").hidden = true;
+  document.getElementById("customer-view").hidden = false;
+  loadProducts();
+}
+
+function doSearch() {
+  const q = document.getElementById("search").value.trim();
+  const category = document.getElementById("category").value;
+  if (!q && !category) return navigate("/");
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (category) params.set("category", category);
+  navigate("/search?" + params);
+}
+
+async function showProductPage(slug) {
+  const res = await fetch("/api/products/" + encodeURIComponent(slug));
+  if (!res.ok) {
+    showToast("Product not found.", "error");
+    history.replaceState({ app: true }, "", "/");
+    route();
+    return;
+  }
   currentProduct = await res.json();
   images = currentProduct.images;
   imgIndex = 0;
@@ -140,11 +214,19 @@ async function openProduct(id) {
 
   const addBtn = document.getElementById("detail-add-btn");
   addBtn.disabled = currentProduct.amount <= 0;
-  addBtn.textContent = currentProduct.amount > 0 ? "Add to cart" : "Out of stock";
+  if (currentProduct.amount <= 0) addBtn.textContent = "Out of stock";
+  else if (!currentUser) addBtn.textContent = "Log in to add to cart";
+  else addBtn.textContent = "Add to cart";
 
   renderImage();
   document.getElementById("customer-view").hidden = true;
   document.getElementById("product-page").hidden = false;
+}
+
+// Back goes to the page you came from. If the product link was opened directly, it goes to the shop.
+function closeProduct() {
+  if (history.state && history.state.app) history.back();
+  else navigate("/");
 }
 
 function renderImage() {
@@ -167,11 +249,6 @@ function changeImage(step) {
   renderImage();
 }
 
-function closeProduct() {
-  document.getElementById("product-page").hidden = true;
-  document.getElementById("customer-view").hidden = false;
-  loadProducts(); // refresh stock numbers
-}
 // ---------- CART ----------
 
 async function loadCart() {
@@ -197,6 +274,11 @@ async function saveQty(id, qty) {
 }
 
 async function addToCart(p) {
+  if (!currentUser) {
+    goLogin();
+    return false;
+  }
+
   const item = cart.find(i => i.id === p.id);
   if (item && item.qty >= item.max) {
     showToast("No more stock available.", "error");
@@ -312,13 +394,6 @@ function renderCart() {
 
 // ---------- CREATE ACCOUNT ----------
 
-function showRegister(show) {
-  document.getElementById("error").textContent = "";
-  document.getElementById("register-error").textContent = "";
-  document.getElementById("login-page").hidden = show;
-  document.getElementById("register-page").hidden = !show;
-}
-
 // Same rules as the server, so people see the problem before sending anything.
 function checkPassword(password) {
   if (password.length < 8) return "Password must be at least 8 characters.";
@@ -362,7 +437,7 @@ async function doRegister() {
   document.getElementById("reg-username").value = "";
   document.getElementById("reg-password").value = "";
   document.getElementById("reg-confirm").value = "";
-  showApp(data);
+  finishAuth(data);
 }
 
 // ---------- BUTTONS ----------
@@ -370,17 +445,23 @@ async function doRegister() {
 document.getElementById("login-btn").addEventListener("click", doLogin);
 document.getElementById("logout-btn").addEventListener("click", doLogout);
 document.getElementById("switch-btn").addEventListener("click", goToRolePage);
-document.getElementById("search").addEventListener("input", closeProduct);
-document.getElementById("category").addEventListener("change", closeProduct);
-document.getElementById("show-register-btn").addEventListener("click", () => showRegister(true));
-document.getElementById("back-to-login-btn").addEventListener("click", () => showRegister(false));
+document.getElementById("show-register-btn").addEventListener("click", () => navigate("/register"));
+document.getElementById("back-to-login-btn").addEventListener("click", () => navigate("/login"));
+document.getElementById("open-login-btn").addEventListener("click", goLogin);
 document.getElementById("register-btn").addEventListener("click", doRegister);
 document.getElementById("back-btn").addEventListener("click", closeProduct);
 document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
 document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
+document.getElementById("category").addEventListener("change", doSearch);
 document.getElementById("detail-add-btn").addEventListener("click", async () => {
   if (await addToCart(currentProduct)) showToast("Added to cart.", "success");
 });
+document.getElementById("search").addEventListener("keydown", e => {
+  if (e.key === "Enter") doSearch();
+});
+
+// Browser back/forward buttons
+window.addEventListener("popstate", route);
 
 // Cart overlay
 const cartOverlay = document.getElementById("cart-overlay");
@@ -395,7 +476,8 @@ document.getElementById("password").addEventListener("keydown", e => {
   if (e.key === "Enter") doLogin();
 });
 
-// On page load: if the server still has a session, skip the login screen.
+// On page load, find out who is logged in (if anyone), then show the page for the current link
 fetch("/api/me").then(res => res.ok ? res.json() : null).then(user => {
-  if (user) showApp(user);
+  applyUser(user);
+  route();
 });

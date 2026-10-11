@@ -196,8 +196,14 @@ app.get("/warehouse", requirePageRole("warehouse"), (req, res) => {
 // Search products by name and/or category. Empty values return everything.
 const CATEGORIES = ["jeans", "trousers", "tops", "others"];
 
+function slugify(name) {
+  return name.toLowerCase().normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 app.get("/api/products", (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
   const q = String(req.query.search || "").trim();
   const category = String(req.query.category || "");
   if (category && !CATEGORIES.includes(category)) {
@@ -210,16 +216,17 @@ app.get("/api/products", (req, res) => {
      WHERE name LIKE ? AND (? = '' OR category = ?)
      ORDER BY name`
   ).all("%" + q + "%", category, category);
-  res.json(rows);
+  res.json(rows.map(r => ({ ...r, slug: slugify(r.name) })));
 });
 
-// One product with all its pictures
-app.get("/api/products/:id", (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+// One product with all its pictures, found by its link name
+app.get("/api/products/:slug", (req, res) => {
+  const slug = req.params.slug.toLowerCase();
   const p = db.prepare(
-    "SELECT id, name, description, price, amount, category FROM products WHERE id = ?"
-  ).get(Number(req.params.id));
+    "SELECT id, name, description, price, amount, category FROM products ORDER BY name"
+  ).all().find(r => slugify(r.name) === slug);
   if (!p) return res.status(404).json({ error: "Product not found" });
+  p.slug = slugify(p.name);
   p.images = db.prepare("SELECT path FROM product_images WHERE product_id = ? ORDER BY id")
     .all(p.id).map(r => r.path);
   res.json(p);
@@ -289,6 +296,10 @@ app.delete("/api/cart/:productId", (req, res) => {
   db.prepare("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?")
     .run(uid, Number(req.params.productId));
   res.json(readCart(uid));
+});
+
+app.get(["/search", "/product/:slug", "/login", "/register"], (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 const PORT = process.env.PORT || 3000;

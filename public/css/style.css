@@ -35,17 +35,17 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   padding: 11px 16px;
   border: 0;
   border-radius: 8px;
-  background: #d6579b;
+  background: #765238;
   color: #fff;
 }
-.primary-btn:hover, .cart-btn:hover { background: #bf4488; }
+.primary-btn:hover, .cart-btn:hover { background: #5e422d; }
 .primary-btn { width: 100%; }
 
 .link-btn {
   border: 0;
   padding: 0;
   background: none;
-  color: #d6579b;
+  color: #765238;
   text-decoration: underline;
 }
 
@@ -86,9 +86,9 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 .topbar input:focus,
 .topbar select:focus {
   outline: none;
-  border-color: #d6579b;
+  border-color: #765238;
   background: #fff;
-  box-shadow: 0 0 0 3px rgba(214, 87, 155, 0.2);
+  box-shadow: 0 0 0 3px rgba(118, 82, 56, 0.2);
 }
 
 .form-error { min-height: 1.2em; margin: 12px 0; color: #b00020; font-size: 0.9rem; }
@@ -101,7 +101,34 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 /* ---------- Customer page ---------- */
 #app-page { max-width: 1000px; margin: 0 auto; padding: 16px; }
 
-.userbar { margin: 0 0 12px; text-align: right; font-size: 0.85rem; color: #555; }
+.userbar { display: flex; justify-content: flex-end; margin: 0 0 12px; font-size: 0.85rem; color: #555; }
+#user-bar { display: flex; align-items: center; gap: 8px; }
+
+.userbar button {
+  padding: 6px 14px;
+  border: 1px solid #765238;
+  border-radius: 999px;
+  background: #fff;
+  color: #765238;
+}
+.userbar button:hover { background: #fdeef6; }
+
+.userbar .login-btn {
+  padding: 9px 28px;
+  border: 0;
+  background: linear-gradient(135deg, #8d6444, #5e422d);
+  color: #fff;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  box-shadow: 0 4px 12px rgba(118, 82, 56, 0.35);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.userbar .login-btn:hover {
+  background: linear-gradient(135deg, #8d6444, #5e422d);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(118, 82, 56, 0.45);
+}
+.userbar .login-btn:active { transform: translateY(0); }
 
 .topbar {
   display: flex;
@@ -118,7 +145,10 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   height: 50px;
   width: auto;
   display: block;
+  cursor: pointer;
 }
+
+.logo-link { flex-shrink: 0; display: block; }
 
 .product-grid {
   display: grid;
@@ -224,4 +254,4 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 }
 #confirm-box { width: min(340px, 90%); padding: 20px; border-radius: 12px; background: #fff; }
 #confirm-box button { padding: 9px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; }
-#confirm-box .primary-btn { width: auto; border: 0; background: #d6579b; }
+#confirm-box .primary-btn { width: auto; border: 0; background: #765238; }

@@ -10,7 +10,7 @@
 <body class="shop">
 
 <!-- LOGIN -->
-<div id="login-page" class="split">
+<div id="login-page" class="split" hidden>
   <div class="split-left">
     <div class="auth-box">
     <img class="logo" id="login-logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
@@ -59,14 +59,19 @@
 
 <!-- LOGGED-IN AREA -->
 <div id="app-page" hidden>
-  <p class="userbar">
-    Logged in as <b id="who"></b>
-    <button id="logout-btn">Log out</button>
-    <button id="switch-btn" hidden></button>
-  </p>
+  <div class="userbar">
+    <div id="guest-bar">
+      <button id="open-login-btn" class="login-btn">Log in</button>
+    </div>
+    <div id="user-bar" hidden>
+      Logged in as <b id="who"></b>
+      <button id="logout-btn">Log out</button>
+      <button id="switch-btn" hidden></button>
+    </div>
+  </div>
 
   <div class="topbar">
-    <img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+    <a href="/" class="logo-link"><img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo"></a>
     <input type="text" id="search" placeholder="Search products">
     <select id="category">
       <option value="">All</option>
@@ -119,7 +124,7 @@
   </div>
 </div>
 
-<script src="js/app.js"></script>
+<script src="/js/app.js"></script>
 
 </body>
 </html>
