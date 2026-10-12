@@ -58,7 +58,8 @@ function applyUser(user) {
   }
 
   document.getElementById("password").value = "";
-  document.getElementById("who").textContent = user.username + " (" + user.role + ")";
+  document.getElementById("who").textContent =
+  user.role === "customer" ? user.username : user.username + " (" + user.role + ")";
 
   const btn = document.getElementById("switch-btn");
   if (user.role === "admin") {
@@ -89,6 +90,8 @@ function finishAuth(user) {
 }
 
 async function doLogout() {
+  document.activeElement.blur(); // closes the dropdown menu
+  if (!(await confirmAction("Are you sure you want to log out?", "Log out"))) return;
   await fetch("/api/logout", { method: "POST" });
   applyUser(null);
   route();
@@ -313,14 +316,14 @@ function changeQty(item, change) {
   saveQty(item.id, newQty);
 }
 
-// Shows the "are you sure" popup
-function confirmRemove(name) {
+// Shows the "are you sure" popup with any message and button label
+function confirmAction(text, yesLabel) {
   return new Promise(resolve => {
     const overlay = document.getElementById("confirm-overlay");
     const yes = document.getElementById("confirm-yes");
     const no = document.getElementById("confirm-no");
-    document.getElementById("confirm-text").textContent =
-      'Remove "' + name + '" from your cart?';
+    document.getElementById("confirm-text").textContent = text;
+    yes.textContent = yesLabel;
     overlay.hidden = false;
     const finish = answer => {
       overlay.hidden = true;
@@ -331,6 +334,10 @@ function confirmRemove(name) {
     yes.onclick = () => finish(true);
     no.onclick = () => finish(false);
   });
+}
+
+function confirmRemove(name) {
+  return confirmAction('Remove "' + name + '" from your cart?', "Remove");
 }
 
 async function askRemove(item) {
@@ -441,8 +448,23 @@ async function doRegister() {
   const res = await fetch("/api/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({
+      username, password,
+      first_name: document.getElementById("reg-first").value,
+      middle_initial: document.getElementById("reg-mi").value,
+      last_name: document.getElementById("reg-last").value,
+      name_extension: document.getElementById("reg-ext").value,
+      email: document.getElementById("reg-email").value,
+      phone: document.getElementById("reg-phone").value,
+      street: document.getElementById("reg-street").value,
+      barangay: document.getElementById("reg-barangay").value,
+      city: document.getElementById("reg-city").value,
+      province: document.getElementById("reg-province").value,
+      postal_code: document.getElementById("reg-postal").value,
+      notes: document.getElementById("reg-notes").value
+    })
   });
+  
   const data = await res.json();
   if (!res.ok) {
     error.textContent = data.error;
@@ -450,9 +472,8 @@ async function doRegister() {
   }
 
   error.textContent = "";
-  document.getElementById("reg-username").value = "";
-  document.getElementById("reg-password").value = "";
-  document.getElementById("reg-confirm").value = "";
+  ["reg-username", "reg-password", "reg-confirm", "reg-first", "reg-mi", "reg-last", "reg-ext", "reg-email", "reg-phone", "reg-street", "reg-barangay", 
+    "reg-city", "reg-province", "reg-postal", "reg-notes"].forEach(id => document.getElementById(id).value = "");
   finishAuth(data);
 }
 
@@ -469,6 +490,8 @@ document.getElementById("back-btn").addEventListener("click", closeProduct);
 document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
 document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
 document.getElementById("category").addEventListener("change", doSearch);
+document.getElementById("account-btn").addEventListener("click", () => showToast("Account page coming soon."));
+document.getElementById("purchases-btn").addEventListener("click", () => showToast("Purchases page coming soon."));
 document.getElementById("detail-add-btn").addEventListener("click", async () => {
   if (await addToCart(currentProduct)) showToast("Added to cart.", "success");
 });

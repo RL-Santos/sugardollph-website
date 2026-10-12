@@ -59,9 +59,18 @@ function checkPassword(password) {
 }
 
 // Create a customer account. The role is always "customer", whatever the browser sends.
+// Normalizes 09XXXXXXXXX or +639XXXXXXXXX to 09XXXXXXXXX. Returns null if it doesn't look right.
+function cleanPhone(p) {
+  const s = String(p || "").replace(/[\s-]/g, "");
+  const m = s.match(/^(?:\+63|0)(9\d{9})$/);
+  return m ? "0" + m[1] : null;
+}
+
 app.post("/api/register", (req, res) => {
-  const username = String(req.body.username || "").trim();
-  const password = String(req.body.password || "");
+  const b = req.body;
+  const username = String(b.username || "").trim();
+  const password = String(b.password || "");
+  const text = k => String(b[k] || "").trim();
 
   if (!/^[A-Za-z0-9_]{3,30}$/.test(username)) {
     return res.status(400).json({ error: "Username must be 3-30 letters, numbers or underscores." });
@@ -69,12 +78,46 @@ app.post("/api/register", (req, res) => {
   const passwordError = checkPassword(password);
   if (passwordError) return res.status(400).json({ error: passwordError });
 
-  // Block "Admin1" when "admin1" already exists
+  const profile = {
+    first_name: text("first_name"),
+    middle_initial: text("middle_initial").replace(/\./g, "").toUpperCase(),
+    last_name: text("last_name"),
+    name_extension: text("name_extension"),
+    email: text("email"), phone: cleanPhone(b.phone),
+    street: text("street"), barangay: text("barangay"), city: text("city"),
+    province: text("province"), postal_code: text("postal_code"), 
+    notes: text("notes")
+  };
+
+  if (!profile.first_name || !profile.last_name || !profile.street || !profile.barangay || !profile.city || !profile.province) {
+    return res.status(400).json({ error: "Please fill in your name and complete address." });
+  }
+  if (!/^[A-Za-z]?$/.test(profile.middle_initial)) {
+    return res.status(400).json({ error: "Middle initial must be a single letter." });
+  } 
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email)) {
+    return res.status(400).json({ error: "Enter a valid email address." });
+  }
+  if (!profile.phone) {
+    return res.status(400).json({ error: "Enter a valid mobile number (09XXXXXXXXX)." });
+  }
+
   const taken = db.prepare("SELECT 1 FROM users WHERE lower(username) = lower(?)").get(username);
   if (taken) return res.status(409).json({ error: "That username is taken." });
 
-  db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'customer')")
-    .run(username, bcrypt.hashSync(password, 10));
+  // Create the account and the profile together, so you never get one without the other
+  db.transaction(() => {
+    const info = db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'customer')")
+      .run(username, bcrypt.hashSync(password, 10));
+    db.prepare(
+  `   INSERT INTO customer_profiles
+      (user_id, first_name, middle_initial, last_name, name_extension, email, phone,
+      street, barangay, city, province, postal_code, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(info.lastInsertRowid, profile.first_name, profile.middle_initial, profile.last_name,
+        profile.name_extension, profile.email, profile.phone, profile.street,
+        profile.barangay, profile.city, profile.province, profile.postal_code, profile.notes);
+  })();
 
   req.session.user = { username, role: "customer" };
   res.json(req.session.user);

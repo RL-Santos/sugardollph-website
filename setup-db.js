@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const db = new Database("shop.db");
 
 // ---------- TABLES ----------
+db.exec("DROP TABLE IF EXISTS customer_profiles");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -34,6 +35,22 @@ db.exec(`
     qty INTEGER NOT NULL CHECK (qty > 0),
     PRIMARY KEY (user_id, product_id)
   );
+
+  CREATE TABLE IF NOT EXISTS customer_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  first_name TEXT NOT NULL,
+  middle_initial TEXT,
+  last_name TEXT NOT NULL,
+  name_extension TEXT,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  street TEXT NOT NULL,
+  barangay TEXT NOT NULL,
+  city TEXT NOT NULL,
+  province TEXT NOT NULL,
+  postal_code TEXT,
+  notes TEXT
+  );
 `);
 
 // ---------- USERS ----------
@@ -55,8 +72,3 @@ const addProduct = db.prepare(
 addProduct.run("Sugardoll Baby Tee", "Baby Tee Short-sleeve Crop top", 180, 100, "tops");
 addProduct.run("Zara Slouchy Jeans", "Trendy jeans", 450, 100, "jeans");
 addProduct.run("Sugardoll Lottie Pants", "Unique and Trendy pants", 229, 100, "trousers");
-
-// ---------- CHECK ----------
-
-console.log("Users:", db.prepare("SELECT id, username, role FROM users").all());
-console.log("Products:", db.prepare("SELECT id, name, category, price, amount FROM products").all());

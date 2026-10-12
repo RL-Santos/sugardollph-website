@@ -50,14 +50,13 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 }
 
 /* ---------- Login + create account (split screen) ---------- */
-.split { display: flex; min-height: 100vh; }
+.split { display: flex; height: 100vh; overflow: hidden; }
 
 .split-left {
   flex: 1;
   display: flex;
-  justify-content: center;
-  align-items: center;
   padding: 24px;
+  overflow-y: auto;
 }
 
 .split-right {
@@ -66,7 +65,7 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   background-image: url(/images/coverphoto.jpg);
 }
 
-.auth-box { width: 100%; max-width: 340px; }
+.auth-box { width: 100%; max-width: 340px; margin: auto; }
 .auth-box h1 { margin: 0 0 4px; font-size: 1.6rem; }
 .auth-box h2 { margin: 0 0 24px; font-size: 1.05rem; font-weight: normal; color: #666; }
 
@@ -91,6 +90,11 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   box-shadow: 0 0 0 3px rgba(118, 82, 56, 0.2);
 }
 
+.form-divider {
+  margin: 24px 0;
+  border: 0;
+  border-top: 1px solid #ddd;
+}
 .form-error { min-height: 1.2em; margin: 12px 0; color: #b00020; font-size: 0.9rem; }
 .hint { margin: 0 0 16px; padding-left: 18px; font-size: 0.8rem; color: #666; }
 
@@ -129,6 +133,37 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   box-shadow: 0 6px 16px rgba(118, 82, 56, 0.45);
 }
 .userbar .login-btn:active { transform: translateY(0); }
+.userbar #user-bar.user-menu { position: relative; display: block; }
+
+.userbar .user-btn { padding: 8px 18px; font-weight: 600; }
+
+.user-dropdown {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 50;
+  min-width: 190px;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+}
+.user-menu:hover .user-dropdown,
+.user-menu:focus-within .user-dropdown { display: flex; }
+
+.userbar .user-dropdown button {
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  color: #333;
+  text-align: left;
+}
+.userbar .user-dropdown button:hover { background: #f6efe9; }
 
 .topbar {
   display: flex;
@@ -221,6 +256,8 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
   line-height: 1;
 }
 #back-btn:hover { background: rgba(118, 82, 56, 0.12); }
+
+#logout-btn { color: #b00020; border-top: 1px solid #eee !important; }
 
 #product-page { max-width: 960px; margin: 0 auto; }
 
