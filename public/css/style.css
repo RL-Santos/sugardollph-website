@@ -385,3 +385,63 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 #confirm-box { width: min(340px, 90%); padding: 20px; border-radius: 12px; background: #fff; }
 #confirm-box button { padding: 9px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; }
 #confirm-box .primary-btn { width: auto; border: 0; background: #765238; }
+
+/* ---------- Account + purchases ---------- */
+.account-layout { display: flex; gap: 32px; align-items: flex-start; }
+
+.account-nav { flex: 0 0 200px; display: flex; flex-direction: column; gap: 4px; }
+.account-nav h3 {
+  margin: 20px 0 6px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #765238;
+}
+.account-nav h3:first-child { margin-top: 0; }
+.account-nav a { padding: 9px 12px; border-radius: 8px; color: #333; text-decoration: none; }
+.account-nav a:hover { background: #f6efe9; }
+.account-nav a.active { background: #765238; color: #fff; }
+
+#account-content { flex: 1; min-width: 0; max-width: 520px; }
+#account-content h2 { margin-top: 0; }
+
+.danger-btn { padding: 11px 16px; border: 0; border-radius: 8px; background: #b00020; color: #fff; }
+.danger-btn:hover { background: #8e001a; }
+
+.order-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  background: #fff;
+}
+.order-head { display: flex; justify-content: space-between; align-items: center; }
+.badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #f6efe9;
+  color: #765238;
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+
+@media (max-width: 700px) {
+  .account-layout { flex-direction: column; gap: 16px; }
+  .account-nav { flex: none; width: 100%; flex-direction: row; flex-wrap: wrap; }
+  .account-nav h3 { width: 100%; margin: 8px 0 0; }
+}
+
+.address-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.address-actions .primary-btn { width: auto; }
+.secondary-btn {
+  padding: 8px 14px;
+  border: 1px solid #765238;
+  border-radius: 8px;
+  background: #fff;
+  color: #765238;
+}
+.secondary-btn:hover { background: #f6efe9; }
+#account-content > .primary-btn { width: auto; }

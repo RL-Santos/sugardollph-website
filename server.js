@@ -66,6 +66,39 @@ function cleanPhone(p) {
   return m ? "0" + m[1] : null;
 }
 
+const MAX_ADDRESSES = 10;
+
+function fullName(p) {
+  return [p.first_name, p.middle_initial ? p.middle_initial + "." : "", p.last_name, p.name_extension]
+    .filter(Boolean).join(" ");
+}
+
+// Checks an address from the browser. Returns { a } if fine, or { error }.
+function readAddress(b) {
+  const text = k => String(b[k] || "").trim();
+  const a = {
+    label: text("label").slice(0, 30),
+    recipient_name: text("recipient_name"),
+    phone: cleanPhone(b.phone),
+    street: text("street"), barangay: text("barangay"), city: text("city"),
+    province: text("province"), postal_code: text("postal_code"), notes: text("notes")
+  };
+  if (!a.recipient_name || !a.street || !a.barangay || !a.city || !a.province) {
+    return { error: "Please fill in the recipient name and the complete address." };
+  }
+  if (!a.phone) return { error: "Enter a valid mobile number (09XXXXXXXXX)." };
+  return { a };
+}
+
+function insertAddress(uid, a, isDefault) {
+  db.prepare(
+    `INSERT INTO addresses
+     (user_id, label, recipient_name, phone, street, barangay, city, province, postal_code, notes, is_default)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(uid, a.label, a.recipient_name, a.phone, a.street, a.barangay, a.city,
+        a.province, a.postal_code, a.notes, isDefault);
+}
+
 app.post("/api/register", (req, res) => {
   const b = req.body;
   const username = String(b.username || "").trim();
@@ -83,40 +116,37 @@ app.post("/api/register", (req, res) => {
     middle_initial: text("middle_initial").replace(/\./g, "").toUpperCase(),
     last_name: text("last_name"),
     name_extension: text("name_extension"),
-    email: text("email"), phone: cleanPhone(b.phone),
-    street: text("street"), barangay: text("barangay"), city: text("city"),
-    province: text("province"), postal_code: text("postal_code"), 
-    notes: text("notes")
+    email: text("email"),
+    phone: cleanPhone(b.phone)
   };
-
-  if (!profile.first_name || !profile.last_name || !profile.street || !profile.barangay || !profile.city || !profile.province) {
-    return res.status(400).json({ error: "Please fill in your name and complete address." });
+  if (!profile.first_name || !profile.last_name) {
+    return res.status(400).json({ error: "Please fill in your first and last name." });
   }
   if (!/^[A-Za-z]?$/.test(profile.middle_initial)) {
     return res.status(400).json({ error: "Middle initial must be a single letter." });
-  } 
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email)) {
     return res.status(400).json({ error: "Enter a valid email address." });
   }
   if (!profile.phone) {
     return res.status(400).json({ error: "Enter a valid mobile number (09XXXXXXXXX)." });
   }
+  const addr = readAddress({ ...b, label: "Home", recipient_name: fullName(profile) });
+  if (addr.error) return res.status(400).json({ error: "Please fill in your complete address." });
 
   const taken = db.prepare("SELECT 1 FROM users WHERE lower(username) = lower(?)").get(username);
   if (taken) return res.status(409).json({ error: "That username is taken." });
 
-  // Create the account and the profile together, so you never get one without the other
   db.transaction(() => {
     const info = db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'customer')")
       .run(username, bcrypt.hashSync(password, 10));
     db.prepare(
-  `   INSERT INTO customer_profiles
-      (user_id, first_name, middle_initial, last_name, name_extension, email, phone,
-      street, barangay, city, province, postal_code, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO customer_profiles
+       (user_id, first_name, middle_initial, last_name, name_extension, email, phone)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(info.lastInsertRowid, profile.first_name, profile.middle_initial, profile.last_name,
-        profile.name_extension, profile.email, profile.phone, profile.street,
-        profile.barangay, profile.city, profile.province, profile.postal_code, profile.notes);
+          profile.name_extension, profile.email, profile.phone);
+    insertAddress(info.lastInsertRowid, addr.a, 1);
   })();
 
   req.session.user = { username, role: "customer" };
@@ -341,9 +371,177 @@ app.delete("/api/cart/:productId", (req, res) => {
   res.json(readCart(uid));
 });
 
-app.get(["/search", "/product/:slug", "/login", "/register"], (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+// Logged-in check that also finds the user's id (req.uid)
+function requireLogin(req, res, next) {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const row = db.prepare("SELECT id FROM users WHERE username = ?").get(req.session.user.username);
+  if (!row) return res.status(401).json({ error: "Not logged in" });
+  req.uid = row.id;
+  next();
+}
+
+// Makes sure the account has a profile row
+function ensureProfile(uid) {
+  db.prepare(
+    `INSERT OR IGNORE INTO customer_profiles (user_id, first_name, last_name, email, phone)
+     VALUES (?, '', '', '', '')`
+  ).run(uid);
+}
+
+app.get("/api/profile", requireLogin, (req, res) => {
+  ensureProfile(req.uid);
+  const p = db.prepare("SELECT * FROM customer_profiles WHERE user_id = ?").get(req.uid);
+  res.json({ ...p, username: req.session.user.username });
 });
+
+app.put("/api/profile", requireLogin, (req, res) => {
+  const b = req.body;
+  const text = k => String(b[k] || "").trim();
+  const username = text("username");
+  const p = {
+    first_name: text("first_name"),
+    middle_initial: text("middle_initial").replace(/\./g, "").toUpperCase(),
+    last_name: text("last_name"),
+    name_extension: text("name_extension"),
+    email: text("email"),
+    phone: cleanPhone(b.phone)
+  };
+
+  if (!/^[A-Za-z0-9_]{3,30}$/.test(username)) {
+    return res.status(400).json({ error: "Username must be 3-30 letters, numbers or underscores." });
+  }
+  if (!p.first_name || !p.last_name) return res.status(400).json({ error: "First and last name are required." });
+  if (!/^[A-Za-z]?$/.test(p.middle_initial)) return res.status(400).json({ error: "Middle initial must be a single letter." });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email)) return res.status(400).json({ error: "Enter a valid email address." });
+  if (!p.phone) return res.status(400).json({ error: "Enter a valid mobile number (09XXXXXXXXX)." });
+
+  const taken = db.prepare("SELECT 1 FROM users WHERE lower(username) = lower(?) AND id != ?").get(username, req.uid);
+  if (taken) return res.status(409).json({ error: "That username is taken." });
+
+  db.transaction(() => {
+    ensureProfile(req.uid);
+    db.prepare("UPDATE users SET username = ? WHERE id = ?").run(username, req.uid);
+    db.prepare(
+      `UPDATE customer_profiles
+       SET first_name = ?, middle_initial = ?, last_name = ?, name_extension = ?, email = ?, phone = ?
+       WHERE user_id = ?`
+    ).run(p.first_name, p.middle_initial, p.last_name, p.name_extension, p.email, p.phone, req.uid);
+  })();
+
+  req.session.user.username = username;
+  res.json(req.session.user);
+});
+
+app.put("/api/password", requireLogin, (req, res) => {
+  const current = String(req.body.current_password || "");
+  const next = String(req.body.new_password || "");
+  const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(req.uid);
+
+  if (!bcrypt.compareSync(current, user.password_hash)) {
+    return res.status(400).json({ error: "Current password is wrong." });
+  }
+  const problem = checkPassword(next);
+  if (problem) return res.status(400).json({ error: problem });
+  if (next === current) return res.status(400).json({ error: "New password must be different." });
+
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(next, 10), req.uid);
+  res.json({ ok: true });
+});
+
+app.delete("/api/account", requireLogin, (req, res) => {
+  if (req.session.user.role !== "customer") {
+    return res.status(403).json({ error: "Only customer accounts can be deleted here." });
+  }
+  const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(req.uid);
+  if (!bcrypt.compareSync(String(req.body.password || ""), user.password_hash)) {
+    return res.status(400).json({ error: "Wrong password." });
+  }
+  const active = db.prepare(
+    "SELECT 1 FROM orders WHERE user_id = ? AND status IN ('pending','paid','packed','shipped')"
+  ).get(req.uid);
+  if (active) return res.status(400).json({ error: "You still have an order in progress." });
+
+  db.transaction(() => {
+    db.prepare("UPDATE orders SET user_id = NULL WHERE user_id = ?").run(req.uid);
+    db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
+    db.prepare("DELETE FROM addresses WHERE user_id = ?").run(req.uid);
+    db.prepare("DELETE FROM customer_profiles WHERE user_id = ?").run(req.uid);
+    db.prepare("DELETE FROM users WHERE id = ?").run(req.uid);
+  })();
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+app.get("/api/orders", requireLogin, (req, res) => {
+  const orders = db.prepare(
+    "SELECT id, status, total, payment_method, created_at FROM orders WHERE user_id = ? ORDER BY id DESC"
+  ).all(req.uid);
+  const items = db.prepare("SELECT name, price, qty FROM order_items WHERE order_id = ?");
+  res.json(orders.map(o => ({ ...o, items: items.all(o.id) })));
+});
+
+app.get("/api/addresses", requireLogin, (req, res) => {
+  res.json(db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id").all(req.uid));
+});
+
+app.post("/api/addresses", requireLogin, (req, res) => {
+  const r = readAddress(req.body);
+  if (r.error) return res.status(400).json({ error: r.error });
+  const count = db.prepare("SELECT COUNT(*) AS n FROM addresses WHERE user_id = ?").get(req.uid).n;
+  if (count >= MAX_ADDRESSES) {
+    return res.status(400).json({ error: "You can save up to " + MAX_ADDRESSES + " addresses." });
+  }
+  insertAddress(req.uid, r.a, count === 0 ? 1 : 0); // the first address is the default
+  res.json({ ok: true });
+});
+
+app.put("/api/addresses/:id", requireLogin, (req, res) => {
+  const r = readAddress(req.body);
+  if (r.error) return res.status(400).json({ error: r.error });
+  const a = r.a;
+  const info = db.prepare(
+    `UPDATE addresses
+     SET label = ?, recipient_name = ?, phone = ?, street = ?, barangay = ?, city = ?,
+         province = ?, postal_code = ?, notes = ?
+     WHERE id = ? AND user_id = ?`
+  ).run(a.label, a.recipient_name, a.phone, a.street, a.barangay, a.city,
+        a.province, a.postal_code, a.notes, Number(req.params.id), req.uid);
+  if (info.changes === 0) return res.status(404).json({ error: "Address not found." });
+  res.json({ ok: true });
+});
+
+app.put("/api/addresses/:id/default", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const found = db.prepare("SELECT 1 FROM addresses WHERE id = ? AND user_id = ?").get(id, req.uid);
+  if (!found) return res.status(404).json({ error: "Address not found." });
+  db.transaction(() => {
+    db.prepare("UPDATE addresses SET is_default = 0 WHERE user_id = ?").run(req.uid);
+    db.prepare("UPDATE addresses SET is_default = 1 WHERE id = ?").run(id);
+  })();
+  res.json({ ok: true });
+});
+
+app.delete("/api/addresses/:id", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const row = db.prepare("SELECT is_default FROM addresses WHERE id = ? AND user_id = ?").get(id, req.uid);
+  if (!row) return res.status(404).json({ error: "Address not found." });
+  db.transaction(() => {
+    db.prepare("DELETE FROM addresses WHERE id = ?").run(id);
+    if (row.is_default) {
+      // Deleted the default? The oldest remaining address takes over.
+      db.prepare(
+        `UPDATE addresses SET is_default = 1
+         WHERE id = (SELECT MIN(id) FROM addresses WHERE user_id = ?)`
+      ).run(req.uid);
+    }
+  })();
+  res.json({ ok: true });
+});
+
+app.get(
+  ["/search", "/product/:slug", "/login", "/register",
+   "/account", "/account/:section", "/purchases", "/purchases/:section"],
+  (req, res) => res.sendFile(path.join(__dirname, "public", "index.html"))
+);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));

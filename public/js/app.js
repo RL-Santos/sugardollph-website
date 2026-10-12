@@ -180,6 +180,8 @@ function route() {
     return route();
   }
 
+  document.getElementById("account-page").hidden = true;
+
   document.getElementById("login-page").hidden = path !== "/login";
   document.getElementById("register-page").hidden = path !== "/register";
   document.getElementById("app-page").hidden = onAuthPage;
@@ -193,6 +195,11 @@ function route() {
   const match = path.match(/^\/product\/([^/]+)$/);
   if (match) {
     showProductPage(decodeURIComponent(match[1]).toLowerCase());
+    return;
+  }
+  const acct = path.match(/^\/(account|purchases)(?:\/([a-z]+))?$/);
+  if (acct) {
+    showAccountPage(acct[1], acct[2]);
     return;
   }
 
@@ -490,8 +497,20 @@ document.getElementById("back-btn").addEventListener("click", closeProduct);
 document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
 document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
 document.getElementById("category").addEventListener("change", doSearch);
-document.getElementById("account-btn").addEventListener("click", () => showToast("Account page coming soon."));
-document.getElementById("purchases-btn").addEventListener("click", () => showToast("Purchases page coming soon."));
+document.getElementById("account-btn").addEventListener("click", () => {
+  document.activeElement.blur();
+  navigate("/account/profile");
+});
+document.getElementById("purchases-btn").addEventListener("click", () => {
+  document.activeElement.blur();
+  navigate("/purchases/status");
+});
+document.querySelectorAll(".account-nav a").forEach(a =>
+  a.addEventListener("click", e => {
+    e.preventDefault();
+    navigate(a.getAttribute("href"));
+  })
+);
 document.getElementById("detail-add-btn").addEventListener("click", async () => {
   if (await addToCart(currentProduct)) showToast("Added to cart.", "success");
 });
@@ -514,6 +533,323 @@ cartOverlay.addEventListener("click", e => {
 document.getElementById("password").addEventListener("keydown", e => {
   if (e.key === "Enter") doLogin();
 });
+
+// ---------- ACCOUNT + PURCHASES PAGES ----------
+
+const val = id => document.getElementById(id).value;
+
+function makeField(label, id, value, type) {
+  const l = document.createElement("label");
+  l.className = "field";
+  l.textContent = label;
+  const i = document.createElement("input");
+  i.type = type || "text";
+  i.id = id;
+  i.value = value || "";
+  l.appendChild(i);
+  return l;
+}
+
+function makeButton(text, onclick, className) {
+  const b = document.createElement("button");
+  b.className = className || "primary-btn";
+  b.textContent = text;
+  b.onclick = onclick;
+  return b;
+}
+
+function makeHeading(text) {
+  const h = document.createElement("h2");
+  h.textContent = text;
+  return h;
+}
+
+// Sends JSON. Shows the error as a toast and returns null if it failed.
+async function send(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showToast(data.error || "Something went wrong.", "error");
+    return null;
+  }
+  return data;
+}
+
+async function renderProfile(box) {
+  const res = await fetch("/api/profile");
+  if (!res.ok) return;
+  const p = await res.json();
+  box.append(
+    makeHeading("Profile"),
+    makeField("Username", "pf-username", p.username),
+    makeField("First name", "pf-first", p.first_name),
+    makeField("Middle initial (optional)", "pf-mi", p.middle_initial),
+    makeField("Last name", "pf-last", p.last_name),
+    makeField("Extension (optional)", "pf-ext", p.name_extension),
+    makeField("Email", "pf-email", p.email, "email"),
+    makeField("Mobile number", "pf-phone", p.phone, "tel"),
+    makeButton("Save changes", async () => {
+      const user = await send("PUT", "/api/profile", {
+        username: val("pf-username"), first_name: val("pf-first"),
+        middle_initial: val("pf-mi"), last_name: val("pf-last"),
+        name_extension: val("pf-ext"), email: val("pf-email"), phone: val("pf-phone")
+      });
+      if (user) {
+        applyUser(user);
+        showToast("Profile saved.", "success");
+      }
+    })
+  );
+}
+
+async function renderPayment(box) {
+  const p = document.createElement("p");
+  p.textContent = "Payment info is coming soon.";
+  box.append(makeHeading("Payment info"), p);
+}
+
+async function reloadAddresses() {
+  const box = document.getElementById("account-content");
+  box.innerHTML = "";
+  await renderAddresses(box);
+}
+
+async function renderAddresses(box) {
+  const res = await fetch("/api/addresses");
+  if (!res.ok) return;
+  const list = await res.json();
+  box.appendChild(makeHeading("Addresses"));
+
+  if (list.length === 0) {
+    const p = document.createElement("p");
+    p.textContent = "You have no saved addresses yet.";
+    box.appendChild(p);
+  }
+
+  list.forEach(a => {
+    const card = document.createElement("div");
+    card.className = "order-card address-card";
+
+    const head = document.createElement("div");
+    head.className = "order-head";
+    const title = document.createElement("b");
+    title.textContent = a.label || "Address";
+    head.appendChild(title);
+    if (a.is_default) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "Default";
+      head.appendChild(badge);
+    }
+
+    const who = document.createElement("div");
+    who.textContent = a.recipient_name + " \u00b7 " + a.phone;
+    const where = document.createElement("div");
+    where.textContent = [a.street, a.barangay, a.city, a.province, a.postal_code]
+      .filter(Boolean).join(", ");
+    card.append(head, who, where);
+
+    if (a.notes) {
+      const notes = document.createElement("small");
+      notes.textContent = "Note: " + a.notes;
+      card.appendChild(notes);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "address-actions";
+    actions.appendChild(makeButton("Edit", () => showAddressForm(a), "secondary-btn"));
+    if (!a.is_default) {
+      actions.appendChild(makeButton("Set as default", async () => {
+        if (await send("PUT", "/api/addresses/" + a.id + "/default", {})) reloadAddresses();
+      }, "secondary-btn"));
+    }
+    actions.appendChild(makeButton("Delete", async () => {
+      if (!(await confirmAction("Delete this address?", "Delete"))) return;
+      if (await send("DELETE", "/api/addresses/" + a.id)) {
+        showToast("Address deleted.", "success");
+        reloadAddresses();
+      }
+    }, "secondary-btn"));
+    card.appendChild(actions);
+    box.appendChild(card);
+  });
+
+  if (list.length < 10) {
+    box.appendChild(makeButton("+ Add new address", () => showAddressForm(null)));
+  }
+}
+
+// One form for both adding (a is null) and editing
+async function showAddressForm(a) {
+  let d = a || {};
+  if (!a) {
+    // Prefill the phone and name from the profile to save typing
+    const pr = await fetch("/api/profile");
+    if (pr.ok) {
+      const p = await pr.json();
+      d = { phone: p.phone, recipient_name: [p.first_name, p.last_name].filter(Boolean).join(" ") };
+    }
+  }
+  const box = document.getElementById("account-content");
+  box.innerHTML = "";
+  box.append(
+    makeHeading(a ? "Edit address" : "Add address"),
+    makeField("Label (optional, like Home or Work)", "ad-label", d.label),
+    makeField("Recipient name", "ad-name", d.recipient_name),
+    makeField("Mobile number", "ad-phone", d.phone, "tel"),
+    makeField("House no. / Street", "ad-street", d.street),
+    makeField("Barangay", "ad-barangay", d.barangay),
+    makeField("City / Municipality", "ad-city", d.city),
+    makeField("Province", "ad-province", d.province),
+    makeField("Postal code (optional)", "ad-postal", d.postal_code),
+    makeField("Delivery notes (optional)", "ad-notes", d.notes)
+  );
+  const actions = document.createElement("div");
+  actions.className = "address-actions";
+  actions.append(
+    makeButton("Save address", async () => {
+      const body = {
+        label: val("ad-label"), recipient_name: val("ad-name"), phone: val("ad-phone"),
+        street: val("ad-street"), barangay: val("ad-barangay"), city: val("ad-city"),
+        province: val("ad-province"), postal_code: val("ad-postal"), notes: val("ad-notes")
+      };
+      const data = await send(a ? "PUT" : "POST", a ? "/api/addresses/" + a.id : "/api/addresses", body);
+      if (data) {
+        showToast("Address saved.", "success");
+        reloadAddresses();
+      }
+    }),
+    makeButton("Cancel", reloadAddresses, "secondary-btn")
+  );
+  box.appendChild(actions);
+}
+
+async function renderPassword(box) {
+  box.append(
+    makeHeading("Change password"),
+    makeField("Current password", "pw-current", "", "password"),
+    makeField("New password", "pw-new", "", "password"),
+    makeField("Confirm new password", "pw-confirm", "", "password"),
+    makeButton("Change password", async () => {
+      const problem = checkPassword(val("pw-new"));
+      if (problem) return showToast(problem, "error");
+      if (val("pw-new") !== val("pw-confirm")) return showToast("Passwords don't match.", "error");
+      const data = await send("PUT", "/api/password", {
+        current_password: val("pw-current"), new_password: val("pw-new")
+      });
+      if (data) {
+        ["pw-current", "pw-new", "pw-confirm"].forEach(id => document.getElementById(id).value = "");
+        showToast("Password changed.", "success");
+      }
+    })
+  );
+}
+
+async function renderDelete(box) {
+  const warn = document.createElement("p");
+  warn.textContent = "This permanently deletes your account, saved details and cart. This can't be undone.";
+  box.append(
+    makeHeading("Delete account"),
+    warn,
+    makeField("Enter your password to confirm", "del-password", "", "password"),
+    makeButton("Delete my account", async () => {
+      if (!(await confirmAction("Delete your account for good?", "Delete"))) return;
+      const data = await send("DELETE", "/api/account", { password: val("del-password") });
+      if (data) {
+        applyUser(null);
+        navigate("/");
+        showToast("Your account was deleted.", "success");
+      }
+    }, "danger-btn")
+  );
+}
+
+async function loadOrders() {
+  const res = await fetch("/api/orders");
+  return res.ok ? await res.json() : [];
+}
+
+function renderOrderList(box, title, orders, emptyText) {
+  box.appendChild(makeHeading(title));
+  if (orders.length === 0) {
+    const p = document.createElement("p");
+    p.textContent = emptyText;
+    box.appendChild(p);
+    return;
+  }
+  orders.forEach(o => {
+    const card = document.createElement("div");
+    card.className = "order-card";
+
+    const head = document.createElement("div");
+    head.className = "order-head";
+    const idText = document.createElement("b");
+    idText.textContent = "Order #" + o.id;
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = o.status;
+    head.append(idText, badge);
+
+    const date = document.createElement("small");
+    date.textContent = new Date(o.created_at.replace(" ", "T") + "Z").toLocaleDateString();
+
+    card.append(head, date);
+    o.items.forEach(i => {
+      const line = document.createElement("div");
+      line.textContent = i.name + " \u00d7 " + i.qty;
+      card.appendChild(line);
+    });
+    const total = document.createElement("b");
+    total.textContent = "Total: PHP " + o.total.toFixed(2);
+    card.appendChild(total);
+    box.appendChild(card);
+  });
+}
+
+async function renderStatus(box) {
+  const active = ["pending", "paid", "packed", "shipped"];
+  const orders = (await loadOrders()).filter(o => active.includes(o.status));
+  renderOrderList(box, "Order status", orders, "You have no orders in progress.");
+}
+
+async function renderHistory(box) {
+  const orders = (await loadOrders()).filter(o => o.status === "delivered");
+  renderOrderList(box, "Order history", orders, "No completed orders yet.");
+}
+
+async function renderReturns(box) {
+  const orders = (await loadOrders()).filter(o => ["cancelled", "returned"].includes(o.status));
+  renderOrderList(box, "Cancelled & returns", orders, "No cancelled or returned orders.");
+}
+
+const SECTIONS = {
+  account: {
+    profile: renderProfile, payment: renderPayment, addresses: renderAddresses,
+    password: renderPassword, delete: renderDelete
+  },
+  purchases: { status: renderStatus, history: renderHistory, returns: renderReturns }
+};
+
+async function showAccountPage(group, section) {
+  if (!currentUser) return goLogin();
+  if (!SECTIONS[group][section]) {
+    history.replaceState({ app: true }, "", group === "account" ? "/account/profile" : "/purchases/status");
+    return route();
+  }
+  document.getElementById("customer-view").hidden = true;
+  document.getElementById("product-page").hidden = true;
+  document.getElementById("account-page").hidden = false;
+  document.querySelectorAll(".account-nav a").forEach(a =>
+    a.classList.toggle("active", a.getAttribute("href") === location.pathname));
+
+  const box = document.getElementById("account-content");
+  box.innerHTML = "";
+  await SECTIONS[group][section](box);
+}
 
 // On page load, find out who is logged in (if anyone), then show the page for the current link
 fetch("/api/me").then(res => res.ok ? res.json() : null).then(user => {

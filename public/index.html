@@ -75,10 +75,6 @@
       <label class="field">Username
         <input type="text" id="reg-username" placeholder="Choose a username">
       </label>
-
-      <label class="field">Username
-        <input type="text" id="reg-username" placeholder="Choose a username">
-      </label>
       <label class="field">Password
         <input type="password" id="reg-password" placeholder="Choose a password">
       </label>
@@ -133,30 +129,48 @@
     <div id="product-list" class="product-grid"></div>
   </div>
 
-<div id="product-page" hidden>
-  <div class="product-layout">
-    <button id="back-btn" aria-label="Back to shop">&lsaquo;</button>
-    <div class="product-media">
-      <div id="gallery">
-        <button id="prev-btn" aria-label="Previous picture">&lt;</button>
-        <img id="product-img" alt="">
-        <button id="next-btn" aria-label="Next picture">&gt;</button>
+  <div id="product-page" hidden>
+    <div class="product-layout">
+      <button id="back-btn" aria-label="Back to shop">&lsaquo;</button>
+      <div class="product-media">
+        <div id="gallery">
+          <button id="prev-btn" aria-label="Previous picture">&lt;</button>
+          <img id="product-img" alt="">
+          <button id="next-btn" aria-label="Next picture">&gt;</button>
+        </div>
+        <p id="img-count"></p>
       </div>
-      <p id="img-count"></p>
-    </div>
 
-    <div class="product-info">
-      <h2 id="product-title"></h2>
-      <p class="product-meta">
-        <b id="product-price"></b>
-        <span class="divider">|</span>
-        <span id="product-stock"></span>
-      </p>
-      <p id="product-desc"></p>
-      <button id="detail-add-btn" class="primary-btn">Add to cart</button>
+      <div class="product-info">
+        <h2 id="product-title"></h2>
+        <p class="product-meta">
+          <b id="product-price"></b>
+          <span class="divider">|</span>
+          <span id="product-stock"></span>
+        </p>
+        <p id="product-desc"></p>
+        <button id="detail-add-btn" class="primary-btn">Add to cart</button>
+      </div>
     </div>
   </div>
-</div>
+
+  <div id="account-page" hidden>
+    <div class="account-layout">
+      <nav class="account-nav">
+        <h3>Account</h3>
+        <a href="/account/profile">Profile</a>
+        <a href="/account/payment">Payment info</a>
+        <a href="/account/addresses">Addresses</a>
+        <a href="/account/password">Change password</a>
+        <a href="/account/delete">Delete account</a>
+        <h3>Purchases</h3>
+        <a href="/purchases/status">Order status</a>
+        <a href="/purchases/history">Order history</a>
+        <a href="/purchases/returns">Cancelled &amp; returns</a>
+      </nav>
+      <section id="account-content"></section>
+    </div>
+  </div>
   
   <!-- CART (slides in from the right) -->
   <div id="cart-overlay" hidden>

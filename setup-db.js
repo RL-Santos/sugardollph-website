@@ -4,7 +4,6 @@ const bcrypt = require("bcrypt");
 const db = new Database("shop.db");
 
 // ---------- TABLES ----------
-db.exec("DROP TABLE IF EXISTS customer_profiles");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -35,21 +34,52 @@ db.exec(`
     qty INTEGER NOT NULL CHECK (qty > 0),
     PRIMARY KEY (user_id, product_id)
   );
-
+  
   CREATE TABLE IF NOT EXISTS customer_profiles (
-  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  first_name TEXT NOT NULL,
-  middle_initial TEXT,
-  last_name TEXT NOT NULL,
-  name_extension TEXT,
-  email TEXT NOT NULL,
-  phone TEXT NOT NULL,
-  street TEXT NOT NULL,
-  barangay TEXT NOT NULL,
-  city TEXT NOT NULL,
-  province TEXT NOT NULL,
-  postal_code TEXT,
-  notes TEXT
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    first_name TEXT NOT NULL,
+    middle_initial TEXT,
+    last_name TEXT NOT NULL,
+    name_extension TEXT,
+    email TEXT NOT NULL,
+    phone TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS addresses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    label TEXT,
+    recipient_name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    street TEXT NOT NULL,
+    barangay TEXT NOT NULL,
+    city TEXT NOT NULL,
+    province TEXT NOT NULL,
+    postal_code TEXT,
+    notes TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','paid','packed','shipped','delivered','cancelled','returned')),
+    total REAL NOT NULL,
+    payment_method TEXT,
+    ship_name TEXT,
+    ship_phone TEXT,
+    ship_address TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    price REAL NOT NULL,
+    qty INTEGER NOT NULL
   );
 `);
 
