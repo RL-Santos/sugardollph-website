@@ -5,6 +5,15 @@ const db = new Database("shop.db");
 
 // ---------- TABLES ----------
 
+// Orders now allow the 'in_progress' status. Recreate the (still empty) orders tables once.
+const oldOrders = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'orders'").get();
+if (oldOrders && !oldOrders.sql.includes("in_progress")) {
+  if (db.prepare("SELECT COUNT(*) AS n FROM orders").get().n > 0) {
+    throw new Error("orders table has data; migrate it manually");
+  }
+  db.exec("DROP TABLE order_items; DROP TABLE orders;");
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +73,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','paid','packed','shipped','delivered','cancelled','returned')),
+    CHECK (status IN ('pending','in_progress','paid','packed','shipped','delivered','cancelled','returned')),
     total REAL NOT NULL,
     payment_method TEXT,
     ship_name TEXT,
@@ -82,6 +91,10 @@ db.exec(`
     qty INTEGER NOT NULL
   );
 `);
+
+if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")) {
+  db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
+}
 
 // ---------- USERS ----------
 

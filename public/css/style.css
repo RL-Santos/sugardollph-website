@@ -408,6 +408,8 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 .danger-btn { padding: 11px 16px; border: 0; border-radius: 8px; background: #b00020; color: #fff; }
 .danger-btn:hover { background: #8e001a; }
 
+.order-card .danger-btn { align-self: flex-start; }
+
 .order-card {
   display: flex;
   flex-direction: column;

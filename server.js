@@ -36,6 +36,17 @@ app.use(session({
 }));
 app.use(express.static("public"));
 
+// Keeps the session in step with the database: deactivated users are logged out, role changes apply right away
+app.use((req, res, next) => {
+  const s = req.session.user;
+  if (s) {
+    const u = db.prepare("SELECT role, active FROM users WHERE username = ?").get(s.username);
+    if (!u || !u.active) delete req.session.user;
+    else s.role = u.role;
+  }
+  next();
+});
+
 // Log in: check the password against the database
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
@@ -43,6 +54,7 @@ app.post("/api/login", (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: "Wrong username or password" });
   }
+  if (!user.active) return res.status(403).json({ error: "This account has been deactivated." });
   req.session.user = { username: user.username, role: user.role };
   res.json(req.session.user);
 });
@@ -184,82 +196,207 @@ function requirePageRole(role) {
   };
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// ---------- ADMIN ----------
+const admin = requireRole("admin");
+const ACTIVE_ORDER = ["pending", "in_progress", "paid", "packed", "shipped"];
+const REVENUE_ORDER = ["in_progress", "paid", "packed", "shipped", "delivered"];
+
+app.get(["/admin", "/admin/users", "/admin/users/:id", "/admin/products", "/admin/orders", "/admin/orders/:id"],
+  requirePageRole("admin"),
+  (req, res) => res.sendFile(path.join(__dirname, "private", "admin.html")));
+
+// Orders with their items. `where` is a SQL fragment that may use the aliases o (orders) and u (users).
+function loadOrders(where, ...params) {
+  const items = db.prepare("SELECT name, price, qty FROM order_items WHERE order_id = ?");
+  return db.prepare(
+    `SELECT o.*, u.username FROM orders o LEFT JOIN users u ON u.id = o.user_id ${where} ORDER BY o.id DESC`
+  ).all(...params).map(o => ({ ...o, items: items.all(o.id) }));
 }
 
-// Admin page: the server fills in the users table, so the HTML needs no JS
-app.get("/admin", requirePageRole("admin"), (req, res) => {
-  const users = db.prepare("SELECT id, username, role FROM users").all();
-
-  const rows = users.map(u => {
-    let action;
-    if (u.username === req.session.user.username) {
-      action = "(you)";
-    } else {
-      const options = ROLES.map(r =>
-        `<option value="${r}"${r === u.role ? " selected" : ""}>${r}</option>`).join("");
-      action = `<form method="POST" action="/admin/users/${u.id}/role">
-        <select name="role">${options}</select> <button type="submit">Save</button>
-      </form>`;
-    }
-    return `<tr><td>${u.id}</td><td>${escapeHtml(u.username)}</td><td>${u.role}</td><td>${action}</td></tr>`;
-  }).join("");
-
-  const flash = req.session.flash;
-  delete req.session.flash;
-  const toast = flash
-    ? `<div class="toast ${flash.type}">${escapeHtml(flash.text)}</div>`
-    : "";
-  
-  const productOptions = db.prepare("SELECT id, name FROM products ORDER BY name").all()
-    .map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
-
-  const page = fs.readFileSync(path.join(__dirname, "private", "admin.html"), "utf8")
-    .replace("<!--TOAST-->", () => toast)
-    .replace("<!--USERS-->", () => rows)
-    .replace("<!--PRODUCTS-->", () => productOptions);
-  res.send(page);
-});
-
-// Upload one or more pictures for a product (admin only; role is checked before any file is saved)
-app.post("/admin/products/images", requirePageRole("admin"), (req, res) => {
-  upload.array("images", 10)(req, res, err => {
-    const files = req.files || [];
-    const product = db.prepare("SELECT id, name FROM products WHERE id = ?")
-      .get(Number(req.body && req.body.product));
-
-    if (err) {
-      req.session.flash = { text: "Upload failed: each picture must be 5 MB or less, max 10 at a time.", type: "error" };
-    } else if (!product) {
-      files.forEach(f => fs.unlink(f.path, () => {}));
-      req.session.flash = { text: "Product not found.", type: "error" };
-    } else if (files.length === 0) {
-      req.session.flash = { text: "No valid pictures chosen (JPG, PNG or WEBP only).", type: "error" };
-    } else {
-      const add = db.prepare("INSERT INTO product_images (product_id, path) VALUES (?, ?)");
-      files.forEach(f => add.run(product.id, "/images/" + f.filename));
-      req.session.flash = { text: files.length + " picture(s) added to " + product.name + ".", type: "success" };
-    }
-    res.redirect("/admin");
+app.get("/api/admin/overview", admin, (req, res) => {
+  const counts = {};
+  db.prepare("SELECT status, COUNT(*) AS n FROM orders GROUP BY status").all()
+    .forEach(r => { counts[r.status] = r.n; });
+  const marks = REVENUE_ORDER.map(() => "?").join(",");
+  res.json({
+    counts,
+    revenue: db.prepare(`SELECT COALESCE(SUM(total), 0) AS t FROM orders WHERE status IN (${marks})`)
+      .get(...REVENUE_ORDER).t,
+    customers: db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'customer'").get().n,
+    products: db.prepare("SELECT COUNT(*) AS n FROM products").get().n,
+    trending: db.prepare(
+      `SELECT oi.name, SUM(oi.qty) AS sold FROM order_items oi JOIN orders o ON o.id = oi.order_id
+       WHERE o.status NOT IN ('cancelled','returned') GROUP BY oi.name ORDER BY sold DESC LIMIT 5`).all(),
+    lowStock: db.prepare("SELECT name, amount FROM products WHERE amount <= 5 ORDER BY amount, name LIMIT 8").all(),
+    recent: db.prepare(
+      `SELECT o.id, o.status, o.total, COALESCE(u.username, o.ship_name, 'Deleted account') AS customer
+       FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 5`).all()
   });
 });
 
-// Change another account's role (admin only)
-app.post("/admin/users/:id/role", requirePageRole("admin"), (req, res) => {
+// ----- users -----
+app.get("/api/admin/users", admin, (req, res) => {
+  const q = "%" + String(req.query.search || "").trim() + "%";
+  res.json(db.prepare(
+    `SELECT u.id, u.username, u.role, u.active, p.first_name, p.last_name, p.email,
+       (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS orders
+     FROM users u LEFT JOIN customer_profiles p ON p.user_id = u.id
+     WHERE u.username LIKE ?
+        OR COALESCE(p.first_name, '') || ' ' || COALESCE(p.last_name, '') LIKE ?
+        OR COALESCE(p.email, '') LIKE ?
+     ORDER BY u.username`
+  ).all(q, q, q));
+});
+
+app.get("/api/admin/users/:id", admin, (req, res) => {
+  const id = Number(req.params.id);
+  const user = db.prepare("SELECT id, username, role, active FROM users WHERE id = ?").get(id);
+  if (!user) return res.status(404).json({ error: "User not found." });
+  user.profile = db.prepare("SELECT * FROM customer_profiles WHERE user_id = ?").get(id) || null;
+  user.addresses = db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id").all(id);
+  user.orders = loadOrders("WHERE o.user_id = ?", id);
+  res.json(user);
+});
+
+app.put("/api/admin/users/:id/role", admin, (req, res) => {
   const id = Number(req.params.id);
   const role = String(req.body.role || "");
   const target = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id);
-
-  if (!ROLES.includes(role)) req.session.flash = { text: "Unknown role.", type: "error" };
-  else if (!target) req.session.flash = { text: "User not found.", type: "error" };
-  else if (target.username === req.session.user.username) req.session.flash = { text: "You can't change your own role.", type: "error" };
-  else {
-    db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
-    req.session.flash = { text: target.username + " is now " + role + ".", type: "success" };
+  if (!ROLES.includes(role)) return res.status(400).json({ error: "Unknown role." });
+  if (!target) return res.status(404).json({ error: "User not found." });
+  if (target.username === req.session.user.username) {
+    return res.status(400).json({ error: "You can't change your own role." });
   }
-  res.redirect("/admin");
+  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+  res.json({ ok: true });
+});
+
+app.put("/api/admin/users/:id/active", admin, (req, res) => {
+  const id = Number(req.params.id);
+  const target = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id);
+  if (!target) return res.status(404).json({ error: "User not found." });
+  if (target.username === req.session.user.username) {
+    return res.status(400).json({ error: "You can't deactivate your own account." });
+  }
+  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(req.body.active ? 1 : 0, id);
+  res.json({ ok: true });
+});
+
+// ----- products (the list itself comes from the public GET /api/products) -----
+const num = v => String(v ?? "").trim() === "" ? NaN : Number(v);
+
+function checkProduct(b, selfId) {
+  const p = {
+    name: String(b.name || "").trim(), description: String(b.description || "").trim(),
+    price: num(b.price), amount: num(b.amount), category: String(b.category || "")
+  };
+  if (!p.name || !slugify(p.name)) return { error: "Enter a product name." };
+  if (!Number.isFinite(p.price) || p.price < 0) return { error: "Enter a valid price." };
+  if (!Number.isInteger(p.amount) || p.amount < 0) return { error: "Stock must be a whole number, 0 or more." };
+  if (!CATEGORIES.includes(p.category)) return { error: "Pick a category." };
+  const clash = db.prepare("SELECT id, name FROM products").all()
+    .some(r => r.id !== selfId && slugify(r.name) === slugify(p.name));
+  if (clash) return { error: "A product with this name already exists." };
+  return { p };
+}
+
+app.get("/api/admin/products/:id", admin, (req, res) => {
+  const p = db.prepare("SELECT * FROM products WHERE id = ?").get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: "Product not found." });
+  p.images = db.prepare("SELECT id, path FROM product_images WHERE product_id = ? ORDER BY id").all(p.id);
+  res.json(p);
+});
+
+app.post("/api/admin/products", admin, (req, res) => {
+  const r = checkProduct(req.body, 0);
+  if (r.error) return res.status(400).json({ error: r.error });
+  const info = db.prepare(
+    "INSERT INTO products (name, description, price, amount, category) VALUES (?, ?, ?, ?, ?)"
+  ).run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category);
+  res.json({ id: Number(info.lastInsertRowid) });
+});
+
+app.put("/api/admin/products/:id", admin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) {
+    return res.status(404).json({ error: "Product not found." });
+  }
+  const r = checkProduct(req.body, id);
+  if (r.error) return res.status(400).json({ error: r.error });
+  db.prepare("UPDATE products SET name = ?, description = ?, price = ?, amount = ?, category = ? WHERE id = ?")
+    .run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category, id);
+  res.json({ id });
+});
+
+app.delete("/api/admin/products/:id", admin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) {
+    return res.status(404).json({ error: "Product not found." });
+  }
+  const pics = db.prepare("SELECT path FROM product_images WHERE product_id = ?").all(id);
+  db.prepare("DELETE FROM products WHERE id = ?").run(id); // pictures and cart rows cascade; old orders keep the name
+  pics.forEach(i => fs.unlink(path.join(__dirname, "public", i.path), () => {}));
+  res.json({ ok: true });
+});
+
+app.post("/api/admin/products/:id/images", admin, (req, res) => {
+  upload.array("images", 10)(req, res, err => {
+    const files = req.files || [];
+    const drop = () => files.forEach(f => fs.unlink(f.path, () => {}));
+    const product = db.prepare("SELECT id FROM products WHERE id = ?").get(Number(req.params.id));
+    if (err) { drop(); return res.status(400).json({ error: "Each picture must be 5 MB or less, max 10 at a time." }); }
+    if (!product) { drop(); return res.status(404).json({ error: "Product not found." }); }
+    if (files.length === 0) return res.status(400).json({ error: "No valid pictures chosen (JPG, PNG or WEBP only)." });
+    const add = db.prepare("INSERT INTO product_images (product_id, path) VALUES (?, ?)");
+    files.forEach(f => add.run(product.id, "/images/" + f.filename));
+    res.json({ added: files.length });
+  });
+});
+
+app.delete("/api/admin/products/:id/images/:imageId", admin, (req, res) => {
+  const img = db.prepare("SELECT id, path FROM product_images WHERE id = ? AND product_id = ?")
+    .get(Number(req.params.imageId), Number(req.params.id));
+  if (!img) return res.status(404).json({ error: "Picture not found." });
+  db.prepare("DELETE FROM product_images WHERE id = ?").run(img.id);
+  fs.unlink(path.join(__dirname, "public", img.path), () => {});
+  res.json({ ok: true });
+});
+
+// ----- orders -----
+app.get("/api/admin/orders", admin, (req, res) => {
+  const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
+  const status = String(req.query.status || "");
+  res.json(loadOrders(
+    `WHERE (? = '' OR o.status = ?)
+       AND (CAST(o.id AS TEXT) LIKE ? OR COALESCE(u.username, '') LIKE ? OR COALESCE(o.ship_name, '') LIKE ?)`,
+    status, status, q, q, q));
+});
+
+app.get("/api/admin/orders/:id", admin, (req, res) => {
+  const o = loadOrders("WHERE o.id = ?", Number(req.params.id))[0];
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  res.json(o);
+});
+
+app.put("/api/admin/orders/:id/approve", admin, (req, res) => {
+  const o = db.prepare("SELECT id, status FROM orders WHERE id = ?").get(Number(req.params.id));
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  if (o.status !== "pending") return res.status(400).json({ error: "Only pending orders can be approved." });
+  db.prepare("UPDATE orders SET status = 'in_progress' WHERE id = ?").run(o.id);
+  res.json({ ok: true });
+});
+
+app.put("/api/admin/orders/:id/cancel", admin, (req, res) => {
+  const o = db.prepare("SELECT id, status FROM orders WHERE id = ?").get(Number(req.params.id));
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  if (!ACTIVE_ORDER.includes(o.status)) return res.status(400).json({ error: "This order can't be cancelled." });
+  db.transaction(() => {
+    db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(o.id);
+    const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
+    db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
+      .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
+  })();
+  res.json({ ok: true });
 });
 
 app.get("/warehouse", requirePageRole("warehouse"), (req, res) => {
@@ -457,7 +594,7 @@ app.delete("/api/account", requireLogin, (req, res) => {
     return res.status(400).json({ error: "Wrong password." });
   }
   const active = db.prepare(
-    "SELECT 1 FROM orders WHERE user_id = ? AND status IN ('pending','paid','packed','shipped')"
+    "SELECT 1 FROM orders WHERE user_id = ? AND status IN ('pending','in_progress','paid','packed','shipped')"
   ).get(req.uid);
   if (active) return res.status(400).json({ error: "You still have an order in progress." });
 
@@ -477,6 +614,55 @@ app.get("/api/orders", requireLogin, (req, res) => {
   ).all(req.uid);
   const items = db.prepare("SELECT name, price, qty FROM order_items WHERE order_id = ?");
   res.json(orders.map(o => ({ ...o, items: items.all(o.id) })));
+});
+
+app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
+  const o = db.prepare("SELECT id FROM orders WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  if (!o) return res.status(404).json({ error: "Order not found." });
+
+  const done = db.transaction(() => {
+    const info = db.prepare(
+      "UPDATE orders SET status = 'cancelled' WHERE id = ? AND status IN ('pending','in_progress')"
+    ).run(o.id);
+    if (info.changes === 0) return false; // already moved past in_progress, or already cancelled
+    const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
+    db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
+      .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
+    return true;
+  })();
+
+  if (!done) return res.status(400).json({ error: "This order can no longer be cancelled." });
+  res.json({ ok: true });
+});
+
+app.post("/api/checkout", requireLogin, (req, res) => {
+  const cart = readCart(req.uid);
+  if (cart.length === 0) return res.status(400).json({ error: "Your cart is empty." });
+  const addr = db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id LIMIT 1").get(req.uid);
+  if (!addr) return res.status(400).json({ error: "Add a delivery address in your account first." });
+
+  const total = cart.reduce((n, i) => n + i.price * i.qty, 0);
+  const shipAddress = [addr.street, addr.barangay, addr.city, addr.province, addr.postal_code].filter(Boolean).join(", ");
+  try {
+    const orderId = db.transaction(() => {
+      const info = db.prepare(
+        `INSERT INTO orders (user_id, status, total, payment_method, ship_name, ship_phone, ship_address)
+         VALUES (?, 'pending', ?, 'COD', ?, ?, ?)`
+      ).run(req.uid, total, addr.recipient_name, addr.phone, shipAddress);
+      const addItem = db.prepare(
+        "INSERT INTO order_items (order_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)");
+      const takeStock = db.prepare("UPDATE products SET amount = amount - ? WHERE id = ? AND amount >= ?");
+      cart.forEach(i => {
+        if (takeStock.run(i.qty, i.id, i.qty).changes === 0) throw new Error("out of stock");
+        addItem.run(info.lastInsertRowid, i.id, i.name, i.price, i.qty);
+      });
+      db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
+      return Number(info.lastInsertRowid);
+    })();
+    res.json({ orderId });
+  } catch {
+    res.status(400).json({ error: "Some items just ran out of stock. Please check your cart." });
+  }
 });
 
 app.get("/api/addresses", requireLogin, (req, res) => {

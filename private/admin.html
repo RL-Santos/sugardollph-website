@@ -4,38 +4,34 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Admin - Sugardoll Clothing Shop</title>
+<link rel="icon" href="/images/SugardollIcon.jpg">
 <link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/admin.css">
 </head>
-<body>
+<body class="shop admin">
 
-<h1>Admin</h1>
-<p><a href="/">Back to shop</a></p>
-<hr>
+<aside id="sidebar">
+  <a class="side-logo" href="/admin" data-nav><img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo"></a>
+  <nav>
+    <a href="/admin" data-nav>Overview</a>
+    <a href="/admin/users" data-nav>Manage Users</a>
+    <a href="/admin/products" data-nav>Manage Products</a>
+    <a href="/admin/orders" data-nav>Manage Orders</a>
+  </nav>
+  <a class="back-link" href="/">&larr; Back to customer view</a>
+</aside>
 
-<ul>
-  <li>Manage products</li>
-  <li>View sales reports</li>
-</ul>
+<button id="sidebar-toggle" aria-label="Hide or show the menu">&#9776;</button>
+<main id="main"></main>
 
-<h2>Users</h2>
-<p><!--TOAST--></p>
-<table border="1" cellpadding="4">
-  <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Change role</th></tr></thead>
-  <tbody>
-<!--USERS-->
-  </tbody>
-</table>
+<div id="confirm-overlay" hidden>
+  <div id="confirm-box">
+    <p id="confirm-text"></p>
+    <button id="confirm-no">Cancel</button>
+    <button id="confirm-yes" class="primary-btn">OK</button>
+  </div>
+</div>
 
-<h2>Product pictures</h2>
-<form method="POST" action="/admin/products/images" enctype="multipart/form-data">
-  <p>
-    Product: <select name="product"><!--PRODUCTS--></select>
-  </p>
-  <p>
-    <input type="file" name="images" accept="image/jpeg,image/png,image/webp" multiple required>
-  </p>
-  <p><button type="submit">Upload pictures</button></p>
-</form>
-
+<script src="/js/admin.js"></script>
 </body>
 </html>

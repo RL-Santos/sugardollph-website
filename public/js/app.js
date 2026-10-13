@@ -23,19 +23,19 @@ async function authenticate(username, password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password })
   });
-  return res.ok ? await res.json() : null;
+  return await res.json();
 }
 
 async function doLogin() {
-  const user = await authenticate(
+  const data = await authenticate(
     document.getElementById("username").value.trim(),
     document.getElementById("password").value
   );
-  if (!user) {
-        document.getElementById("error").textContent = "Wrong username or password.";
+  if (data.error) {
+    document.getElementById("error").textContent = data.error;
     return;
   }
-  finishAuth(user);
+  finishAuth(data);
 }
 
 function goToRolePage() {
@@ -324,13 +324,14 @@ function changeQty(item, change) {
 }
 
 // Shows the "are you sure" popup with any message and button label
-function confirmAction(text, yesLabel) {
+function confirmAction(text, yesLabel, noLabel) {
   return new Promise(resolve => {
     const overlay = document.getElementById("confirm-overlay");
     const yes = document.getElementById("confirm-yes");
     const no = document.getElementById("confirm-no");
     document.getElementById("confirm-text").textContent = text;
     yes.textContent = yesLabel;
+    no.textContent = noLabel || "Cancel";
     overlay.hidden = false;
     const finish = answer => {
       overlay.hidden = true;
@@ -525,8 +526,19 @@ window.addEventListener("popstate", route);
 const cartOverlay = document.getElementById("cart-overlay");
 document.getElementById("cart-btn").addEventListener("click", () => { cartOverlay.hidden = false; });
 document.getElementById("cart-close-btn").addEventListener("click", () => { cartOverlay.hidden = true; });
+
 cartOverlay.addEventListener("click", e => {
   if (e.target === cartOverlay) cartOverlay.hidden = true;
+});
+
+document.getElementById("checkout-btn").addEventListener("click", async () => {
+  if (!(await confirmAction("Place this order? Payment is cash on delivery (COD).", "Place order"))) return;
+  const data = await send("POST", "/api/checkout", {});
+  if (!data) return;
+  cartOverlay.hidden = true;
+  await loadCart();
+  showToast("Order placed. Waiting for approval.", "success");
+  navigate("/purchases/status");
 });
 
 // Pressing Enter in the password box also logs in
@@ -773,6 +785,17 @@ async function loadOrders() {
   return res.ok ? await res.json() : [];
 }
 
+const STATUS_TEXT = {
+  pending: "Waiting for the shop to approve your order",
+  in_progress: "Approved - the shop is preparing your order",
+  paid: "Paid",
+  packed: "Packed",
+  shipped: "On its way",
+  delivered: "Delivered",
+  cancelled: "Cancelled",
+  returned: "Returned"
+};
+
 function renderOrderList(box, title, orders, emptyText) {
   box.appendChild(makeHeading(title));
   if (orders.length === 0) {
@@ -791,13 +814,16 @@ function renderOrderList(box, title, orders, emptyText) {
     idText.textContent = "Order #" + o.id;
     const badge = document.createElement("span");
     badge.className = "badge";
-    badge.textContent = o.status;
+    badge.textContent = o.status.replace("_", " ");
     head.append(idText, badge);
+
+    const statusLine = document.createElement("small");
+    statusLine.textContent = STATUS_TEXT[o.status] || o.status;
 
     const date = document.createElement("small");
     date.textContent = new Date(o.created_at.replace(" ", "T") + "Z").toLocaleDateString();
 
-    card.append(head, date);
+    card.append(head, statusLine, date);
     o.items.forEach(i => {
       const line = document.createElement("div");
       line.textContent = i.name + " \u00d7 " + i.qty;
@@ -806,12 +832,22 @@ function renderOrderList(box, title, orders, emptyText) {
     const total = document.createElement("b");
     total.textContent = "Total: PHP " + o.total.toFixed(2);
     card.appendChild(total);
+
+    if (o.status === "pending" || o.status === "in_progress") {
+      card.appendChild(makeButton("Cancel order", async () => {
+        if (!(await confirmAction("Cancel order #" + o.id + "?", "Cancel order", "Keep order"))) return;
+        if (await send("PUT", "/api/orders/" + o.id + "/cancel", {})) {
+          showToast("Order cancelled.", "success");
+          route(); // reloads the page; the order now shows under Cancelled & returns
+        }
+      }, "danger-btn"));
+    }
     box.appendChild(card);
   });
 }
 
 async function renderStatus(box) {
-  const active = ["pending", "paid", "packed", "shipped"];
+  const active = ["pending", "in_progress", "paid", "packed", "shipped"];
   const orders = (await loadOrders()).filter(o => active.includes(o.status));
   renderOrderList(box, "Order status", orders, "You have no orders in progress.");
 }
