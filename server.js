@@ -201,7 +201,8 @@ const admin = requireRole("admin");
 const ACTIVE_ORDER = ["pending", "in_progress", "paid", "packed", "shipped"];
 const REVENUE_ORDER = ["in_progress", "paid", "packed", "shipped", "delivered"];
 
-app.get(["/admin", "/admin/users", "/admin/users/:id", "/admin/products", "/admin/orders", "/admin/orders/:id"],
+app.get(["/admin", "/admin/users", "/admin/users/:id", "/admin/products", "/admin/orders", "/admin/orders/:id",
+         "/admin/chats", "/admin/chats/:id"],
   requirePageRole("admin"),
   (req, res) => res.sendFile(path.join(__dirname, "private", "admin.html")));
 
@@ -720,6 +721,192 @@ app.delete("/api/addresses/:id", requireLogin, (req, res) => {
       ).run(req.uid);
     }
   })();
+  res.json({ ok: true });
+});
+
+// ---------- CUSTOMER SERVICE CHAT ----------
+const CHAT_TOPICS = {
+  order_status: "Where is my order?",
+  cancel_order: "Cancel or change an order",
+  return_refund: "Return or refund",
+  product: "Product or sizing question",
+  account: "Account or login help",
+  other: "Something else (not listed)"
+};
+const MAX_MESSAGE = 1000;
+
+// One chat row with customer name, who claimed it, and its last customer/admin message
+const CHAT_SELECT = `
+  SELECT c.id, c.user_id, c.topic, c.status, c.admin_id, c.created_at, c.updated_at,
+    COALESCE(NULLIF(ap.first_name, ''), au.username) AS agent_name,
+    cu.username AS customer_username,
+    TRIM(COALESCE(cp.first_name, '') || ' ' || COALESCE(cp.last_name, '')) AS customer_name,
+    (SELECT body FROM chat_messages WHERE chat_id = c.id AND sender != 'system' ORDER BY id DESC LIMIT 1) AS last_body,
+    (SELECT sender FROM chat_messages WHERE chat_id = c.id AND sender != 'system' ORDER BY id DESC LIMIT 1) AS last_sender
+  FROM chats c
+  JOIN users cu ON cu.id = c.user_id
+  LEFT JOIN customer_profiles cp ON cp.user_id = c.user_id
+  LEFT JOIN users au ON au.id = c.admin_id
+  LEFT JOIN customer_profiles ap ON ap.user_id = c.admin_id`;
+
+const shapeChat = (c, viewerId) => ({ ...c, topic_label: CHAT_TOPICS[c.topic], mine: c.admin_id === viewerId });
+const chatText = v => String(v ?? "").trim().slice(0, MAX_MESSAGE);
+const adminIdOf = req => db.prepare("SELECT id FROM users WHERE username = ?").get(req.session.user.username).id;
+
+// An admin's first name, or their username if they haven't filled in a profile
+function agentName(adminId) {
+  const r = db.prepare(
+    `SELECT COALESCE(NULLIF(p.first_name, ''), u.username) AS n
+     FROM users u LEFT JOIN customer_profiles p ON p.user_id = u.id WHERE u.id = ?`).get(adminId);
+  return r ? r.n : "An agent";
+}
+
+function addMessage(chatId, sender, senderId, body) {
+  db.prepare("INSERT INTO chat_messages (chat_id, sender, sender_id, body) VALUES (?, ?, ?, ?)")
+    .run(chatId, sender, senderId, body);
+  db.prepare("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(chatId);
+}
+
+// Messages newer than `after`. Admin messages carry the admin's first name.
+function chatMessages(chatId, after) {
+  return db.prepare(
+    `SELECT m.id, m.sender, m.body, m.created_at, COALESCE(NULLIF(p.first_name, ''), u.username) AS name
+     FROM chat_messages m
+     LEFT JOIN users u ON u.id = m.sender_id AND m.sender = 'admin'
+     LEFT JOIN customer_profiles p ON p.user_id = u.id
+     WHERE m.chat_id = ? AND m.id > ? ORDER BY m.id`).all(chatId, after);
+}
+
+function endChat(id, text) {
+  db.transaction(() => {
+    db.prepare("UPDATE chats SET status = 'closed' WHERE id = ?").run(id);
+    addMessage(id, "system", null, text);
+  })();
+}
+
+function requireCustomer(req, res, next) {
+  requireLogin(req, res, () => {
+    if (req.session.user.role !== "customer") return res.status(403).json({ error: "Only customers can use chat." });
+    next();
+  });
+}
+
+// ----- customer side -----
+app.get("/api/chat/topics", (req, res) => {
+  res.json(Object.entries(CHAT_TOPICS).map(([key, label]) => ({ key, label })));
+});
+
+app.get("/api/chats", requireCustomer, (req, res) => {
+  res.json(db.prepare(`${CHAT_SELECT} WHERE c.user_id = ? ORDER BY c.updated_at DESC, c.id DESC`)
+    .all(req.uid).map(c => shapeChat(c)));
+});
+
+app.post("/api/chats", requireCustomer, (req, res) => {
+  const topic = String(req.body.topic || "");
+  const message = chatText(req.body.message);
+  if (!Object.hasOwn(CHAT_TOPICS, topic)) return res.status(400).json({ error: "Pick what you need help with." });
+  if (topic === "other" && message.length < 10) {
+    return res.status(400).json({ error: "Please describe your concern (at least 10 characters)." });
+  }
+  // One open chat per concern. Reuse it instead of creating a duplicate.
+  const open = db.prepare("SELECT id FROM chats WHERE user_id = ? AND topic = ? AND status = 'open'").get(req.uid, topic);
+  if (open) {
+    if (message) addMessage(open.id, "customer", req.uid, message);
+    return res.json({ id: open.id });
+  }
+  const id = db.transaction(() => {
+    const cid = Number(db.prepare("INSERT INTO chats (user_id, topic) VALUES (?, ?)").run(req.uid, topic).lastInsertRowid);
+    addMessage(cid, "system", null, "Thanks for reaching out! An agent will join this chat shortly.");
+    if (message) addMessage(cid, "customer", req.uid, message);
+    return cid;
+  })();
+  res.json({ id });
+});
+
+app.get("/api/chats/:id/messages", requireCustomer, (req, res) => {
+  const chat = db.prepare(`${CHAT_SELECT} WHERE c.id = ? AND c.user_id = ?`).get(Number(req.params.id), req.uid);
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  res.json({ chat: shapeChat(chat), messages: chatMessages(chat.id, Number(req.query.after) || 0) });
+});
+
+app.post("/api/chats/:id/messages", requireCustomer, (req, res) => {
+  const chat = db.prepare("SELECT id, status FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  if (chat.status !== "open") return res.status(400).json({ error: "This chat has ended." });
+  const body = chatText(req.body.body);
+  if (!body) return res.status(400).json({ error: "Type a message first." });
+  addMessage(chat.id, "customer", req.uid, body);
+  res.json({ ok: true });
+});
+
+app.put("/api/chats/:id/close", requireCustomer, (req, res) => {
+  const chat = db.prepare("SELECT id, status FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  if (chat.status === "open") endChat(chat.id, "The customer ended this chat.");
+  res.json({ ok: true });
+});
+
+// ----- admin side -----
+// Business-rule failures use 409 (not 403) because admin.js sends any 403 back to the home page.
+app.get("/api/admin/chats", admin, (req, res) => {
+  const status = req.query.status === "closed" ? "closed" : "open";
+  const me = adminIdOf(req);
+  res.json(db.prepare(`${CHAT_SELECT} WHERE c.status = ? ORDER BY c.updated_at DESC, c.id DESC`)
+    .all(status).map(c => shapeChat(c, me)));
+});
+
+app.get("/api/admin/chats/:id/messages", admin, (req, res) => {
+  const chat = db.prepare(`${CHAT_SELECT} WHERE c.id = ?`).get(Number(req.params.id));
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  res.json({ chat: shapeChat(chat, adminIdOf(req)), messages: chatMessages(chat.id, Number(req.query.after) || 0) });
+});
+
+// Claim only works while nobody holds the chat, so two admins can never both get it.
+app.put("/api/admin/chats/:id/claim", admin, (req, res) => {
+  const me = adminIdOf(req);
+  const id = Number(req.params.id);
+  const done = db.transaction(() => {
+    const info = db.prepare("UPDATE chats SET admin_id = ? WHERE id = ? AND status = 'open' AND admin_id IS NULL").run(me, id);
+    if (info.changes === 0) return false;
+    addMessage(id, "system", null, agentName(me) + " has joined the chat and will assist you.");
+    return true;
+  })();
+  if (!done) return res.status(409).json({ error: "This chat is closed or already claimed by another admin." });
+  res.json({ ok: true });
+});
+
+// Only the admin holding the chat can release it. After that anyone can claim it.
+app.put("/api/admin/chats/:id/release", admin, (req, res) => {
+  const me = adminIdOf(req);
+  const id = Number(req.params.id);
+  const done = db.transaction(() => {
+    const info = db.prepare("UPDATE chats SET admin_id = NULL WHERE id = ? AND status = 'open' AND admin_id = ?").run(id, me);
+    if (info.changes === 0) return false;
+    addMessage(id, "system", null, agentName(me) + " has left the chat. Please wait while another agent takes over.");
+    return true;
+  })();
+  if (!done) return res.status(409).json({ error: "You haven't claimed this chat." });
+  res.json({ ok: true });
+});
+
+app.post("/api/admin/chats/:id/messages", admin, (req, res) => {
+  const me = adminIdOf(req);
+  const chat = db.prepare("SELECT id, status, admin_id FROM chats WHERE id = ?").get(Number(req.params.id));
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  if (chat.status !== "open") return res.status(400).json({ error: "This chat is closed." });
+  if (chat.admin_id !== me) return res.status(409).json({ error: "Claim this chat before replying." });
+  const body = chatText(req.body.body);
+  if (!body) return res.status(400).json({ error: "Type a message first." });
+  addMessage(chat.id, "admin", me, body);
+  res.json({ ok: true });
+});
+
+app.put("/api/admin/chats/:id/close", admin, (req, res) => {
+  const me = adminIdOf(req);
+  const chat = db.prepare("SELECT id, status, admin_id FROM chats WHERE id = ?").get(Number(req.params.id));
+  if (!chat) return res.status(404).json({ error: "Chat not found." });
+  if (chat.status !== "open" || chat.admin_id !== me) return res.status(409).json({ error: "You can only close a chat you've claimed." });
+  endChat(chat.id, agentName(me) + " closed this chat.");
   res.json({ ok: true });
 });
 

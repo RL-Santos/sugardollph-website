@@ -89,3 +89,6 @@ table.items th, table.items td { padding: 10px 12px; text-align: left; border-bo
 .badge.in_progress { background: #dbeafe; color: #1e40af; }
 .badge.delivered { background: #dcfce7; color: #166534; }
 .badge.cancelled, .badge.returned { background: #fde4e8; color: #b00020; }
+
+.admin .chat-log { flex: none; height: 55vh; padding: 12px; margin: 12px 0; border: 1px solid #ddd; border-radius: 12px; background: #fff; }
+.admin .chat-note { margin-bottom: 12px; }

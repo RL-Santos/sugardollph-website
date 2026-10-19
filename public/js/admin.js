@@ -85,7 +85,9 @@ const routes = [
   [/^\/admin\/users\/(\d+)$/, viewUser],
   [/^\/admin\/products\/?$/, viewProducts],
   [/^\/admin\/orders\/?$/, viewOrders],
-  [/^\/admin\/orders\/(\d+)$/, viewOrder]
+  [/^\/admin\/orders\/(\d+)$/, viewOrder],
+  [/^\/admin\/chats\/?$/, viewChats],
+  [/^\/admin\/chats\/(\d+)$/, viewChat]
 ];
 
 function route() {
@@ -387,6 +389,115 @@ async function productForm(box, id) {
       h("div", { class: "row-actions" },
         h("button", { class: "primary-btn", onclick: save }, "Save product"),
         h("button", { class: "secondary-btn", onclick: () => viewProducts(box) }, "Cancel"))));
+}
+
+// ---------- chats ----------
+
+const chatState = c => !c.admin_id ? "Unclaimed" : c.mine ? "Claimed by you" : "Claimed by " + c.agent_name;
+const chatBadge = c => h("span", {
+  class: "badge " + (c.status === "closed" ? "cancelled" : !c.admin_id ? "pending" : c.mine ? "delivered" : "in_progress")
+}, c.status === "closed" ? "Closed" : chatState(c));
+
+// Runs fn every few seconds until `box` is no longer on the page
+function poll(box, fn, ms = 3000) {
+  const t = setInterval(() => {
+    if (!box.isConnected) clearInterval(t);
+    else if (!document.hidden) fn();
+  }, ms);
+}
+
+function viewChats(box) {
+  const status = h("select", {}, h("option", { value: "open" }, "Open chats"), h("option", { value: "closed" }, "Closed chats"));
+  const list = h("div", { class: "list" });
+
+  async function load() {
+    const rows = await api("GET", "/api/admin/chats?status=" + status.value);
+    if (rows) list.replaceChildren(...(rows.length ? rows.map(chatCard) : ["No chats here."]));
+  }
+
+  function chatCard(c) {
+    const waiting = c.status === "open" && c.last_sender === "customer";
+    return h("div", { class: "row-card clickable", onclick: () => navigate("/admin/chats/" + c.id) },
+      h("div", { class: "row-info" },
+        h("b", {}, c.customer_name || c.customer_username, " ", h("span", { class: "badge" }, c.topic_label)),
+        h("small", {}, (waiting ? "Customer is waiting: " : "") + (c.last_body || "No messages yet").slice(0, 80)),
+        h("small", {}, when(c.updated_at))),
+      h("div", { class: "row-actions" }, chatBadge(c)));
+  }
+
+  status.addEventListener("change", load);
+  box.append(h("div", { class: "page-head" }, h("h1", {}, "Chats")), h("div", { class: "toolbar" }, status), list);
+  load();
+  poll(box, load);
+}
+
+async function viewChat(box, id) {
+  let last = 0, chat = null, chatKey = "";
+  const log = h("div", { class: "chat-log" });
+  const head = h("div", { class: "page-head" });
+  const note = h("p", { class: "chat-note" });
+  const input = h("input", { type: "text", maxlength: "1000", placeholder: "Type a message" });
+  const compose = h("div", { class: "chat-compose" }, input, h("button", { class: "primary-btn", onclick: send }, "Send"));
+  input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+
+  const act = (text, cls, path, ok) => h("button", {
+    class: cls,
+    onclick: async () => { if (await api("PUT", `/api/admin/chats/${id}/${path}`)) { toast(ok, "success"); refresh(); } }
+  }, text);
+
+  const closeBtn = h("button", {
+    class: "danger-btn",
+    onclick: async () => {
+      if (!(await confirmAction("Close this chat? The customer will be told it has ended.", "Close chat", "Keep open"))) return;
+      if (await api("PUT", `/api/admin/chats/${id}/close`)) { toast("Chat closed.", "success"); refresh(); }
+    }
+  }, "Close chat");
+
+  function bubble(m) {
+    if (m.sender === "system") return h("div", { class: "chat-system" }, m.body);
+    return h("div", { class: "chat-msg " + (m.sender === "admin" ? "out" : "in") },
+      h("small", {}, (m.sender === "admin" ? m.name : "Customer") + " \u00b7 " + when(m.created_at)),
+      h("div", { class: "chat-bubble" }, m.body));
+  }
+
+  function drawHead() {
+    const open = chat.status === "open";
+    head.replaceChildren(
+      h("h1", {}, (chat.customer_name || chat.customer_username) + " \u00b7 " + chat.topic_label),
+      chatBadge(chat),
+      open && !chat.admin_id ? act("Claim chat", "primary-btn", "claim", "You claimed this chat.") : "",
+      open && chat.mine ? [act("Remove myself", "secondary-btn", "release", "You left this chat."), closeBtn] : "",
+      h("a", { href: "/admin/users/" + chat.user_id, "data-nav": "" }, "View customer"));
+    note.textContent = !open ? "This chat is closed."
+      : !chat.admin_id ? "Claim this chat to reply. Other admins can read it, but can't reply while it's claimed."
+      : !chat.mine ? chat.agent_name + " is handling this chat. Only they can reply until they remove themselves."
+      : "";
+    note.hidden = !note.textContent;
+    compose.hidden = !(open && chat.mine);
+  }
+
+  async function refresh() {
+    const d = await api("GET", `/api/admin/chats/${id}/messages?after=${last}`);
+    if (!box.isConnected) return;
+    if (!d) return navigate("/admin/chats");
+    const key = [d.chat.status, d.chat.admin_id].join();
+    chat = d.chat;
+    if (key !== chatKey) { chatKey = key; drawHead(); }
+    d.messages.forEach(m => { last = m.id; log.append(bubble(m)); });
+    if (d.messages.length) log.scrollTop = log.scrollHeight;
+  }
+
+  async function send() {
+    const body = input.value.trim();
+    if (!body) return;
+    input.value = "";
+    if (await api("POST", `/api/admin/chats/${id}/messages`, { body })) refresh();
+    else input.value = body;
+  }
+
+  box.append(backLink("/admin/chats", "Back to chats"), head, log, note, compose);
+  await refresh();
+  poll(box, refresh);
 }
 
 // ---------- start ----------
