@@ -465,9 +465,10 @@ async function viewChat(box, id) {
     head.replaceChildren(
       h("h1", {}, (chat.customer_name || chat.customer_username) + " \u00b7 " + chat.topic_label),
       chatBadge(chat),
-      open && !chat.admin_id ? act("Claim chat", "primary-btn", "claim", "You claimed this chat.") : "",
-      open && chat.mine ? [act("Remove myself", "secondary-btn", "release", "You left this chat."), closeBtn] : "",
+      ...(open && !chat.admin_id ? [act("Claim chat", "primary-btn", "claim", "You claimed this chat.")] : []),
+      ...(open && chat.mine ? [act("Remove myself", "secondary-btn", "release", "You left this chat."), closeBtn] : []),
       h("a", { href: "/admin/users/" + chat.user_id, "data-nav": "" }, "View customer"));
+
     note.textContent = !open ? "This chat is closed."
       : !chat.admin_id ? "Claim this chat to reply. Other admins can read it, but can't reply while it's claimed."
       : !chat.mine ? chat.agent_name + " is handling this chat. Only they can reply until they remove themselves."
@@ -483,7 +484,7 @@ async function viewChat(box, id) {
     const key = [d.chat.status, d.chat.admin_id].join();
     chat = d.chat;
     if (key !== chatKey) { chatKey = key; drawHead(); }
-    d.messages.forEach(m => { last = m.id; log.append(bubble(m)); });
+    d.messages.forEach(m => { if (m.id <= last) return; last = m.id; log.append(bubble(m)); });
     if (d.messages.length) log.scrollTop = log.scrollHeight;
   }
 

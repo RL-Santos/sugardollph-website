@@ -47,6 +47,7 @@ function goToRolePage() {
 function applyUser(user) {
   currentUser = user;
   chatUserChanged(); 
+  notifUserChanged(!!user && user.role === "customer"); 
   document.getElementById("guest-bar").hidden = !!user;
   document.getElementById("user-bar").hidden = !user;
   document.getElementById("cart-btn").hidden = !user;

@@ -122,6 +122,10 @@
       <option value="tops">Tops</option>
       <option value="others">Others</option>
     </select>
+    <div id="bell-wrap" class="bell-wrap" hidden>
+      <button id="bell-btn" class="bell-btn" aria-label="Notifications">&#128276;<span id="bell-count" hidden></span></button>
+      <div id="notif-panel" hidden></div>
+    </div>
     <button id="cart-btn" class="cart-btn">Cart (<span id="cart-count">0</span>)</button>
   </div>
 
@@ -207,6 +211,7 @@
 
 <script src="/js/app.js"></script>
 <script src="/js/chat.js"></script>
+<script src="/js/notifications.js"></script>
 
 </body>
 </html>

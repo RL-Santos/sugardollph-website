@@ -23,6 +23,12 @@
 </aside>
 
 <button id="sidebar-toggle" aria-label="Hide or show the menu">&#9776;</button>
+
+<div id="bell-wrap" class="bell-wrap bell-fixed" hidden>
+  <button id="bell-btn" class="bell-btn" aria-label="Notifications">&#128276;<span id="bell-count" hidden></span></button>
+  <div id="notif-panel" hidden></div>
+</div>
+
 <main id="main"></main>
 
 <div id="confirm-overlay" hidden>
@@ -34,5 +40,6 @@
 </div>
 
 <script src="/js/admin.js"></script>
+<script src="/js/notifications.js"></script>
 </body>
 </html>

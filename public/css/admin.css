@@ -92,3 +92,8 @@ table.items th, table.items td { padding: 10px 12px; text-align: left; border-bo
 
 .admin .chat-log { flex: none; height: 55vh; padding: 12px; margin: 12px 0; border: 1px solid #ddd; border-radius: 12px; background: #fff; }
 .admin .chat-note { margin-bottom: 12px; }
+
+#main a:not(.stat):not(.line) { color: #765238; font-weight: 600; text-decoration: none; }
+#main a:not(.stat):not(.line):hover { color: #5e422d; text-decoration: underline; }
+
+.bell-fixed { position: fixed; top: 12px; right: 16px; z-index: 60; }

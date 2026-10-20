@@ -6,6 +6,7 @@ const chatTitle = document.getElementById("chat-title");
 const chatBack = document.getElementById("chat-back");
 let chatTimer = null;
 let chatToken = 0; // bumps on every screen change so slow, older responses are ignored
+let chatStarting = false;
 
 const chatGet = url => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
 const chatState = c => c.status === "closed" ? "Closed" : c.agent_name ? "With " + c.agent_name : "Waiting for an agent";
@@ -86,8 +87,12 @@ function showOtherForm(canGoBack) {
 }
 
 async function startChat(topic, message) {
-  const data = await send("POST", "/api/chats", { topic, message });
-  if (data) showChat(data.id);
+  if (chatStarting) return;
+  chatStarting = true;
+  try {
+    const data = await send("POST", "/api/chats", { topic, message });
+    if (data) showChat(data.id);
+  } finally { chatStarting = false; }
 }
 
 // ----- screen 3: one chat -----
@@ -125,7 +130,7 @@ async function showChat(id) {
       ? "You're chatting with " + d.chat.agent_name : "Waiting for an agent to join...";
     endBtn.hidden = closed;
     form.hidden = closed;
-    d.messages.forEach(m => { last = m.id; log.append(bubble(m)); });
+    d.messages.forEach(m => { if (m.id <= last) return; last = m.id; log.append(bubble(m)); });
     if (d.messages.length) log.scrollTop = log.scrollHeight;
   }
 
@@ -145,6 +150,11 @@ async function showChat(id) {
 
   await refresh();
   startChatPoll(refresh);
+}
+
+function openChatById(id) {
+  chatPanel.hidden = false;
+  showChat(id);
 }
 
 document.getElementById("chat-fab").addEventListener("click", () => {

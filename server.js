@@ -384,6 +384,7 @@ app.put("/api/admin/orders/:id/approve", admin, (req, res) => {
   if (!o) return res.status(404).json({ error: "Order not found." });
   if (o.status !== "pending") return res.status(400).json({ error: "Only pending orders can be approved." });
   db.prepare("UPDATE orders SET status = 'in_progress' WHERE id = ?").run(o.id);
+  notifyOrder(o.id, "in_progress");
   res.json({ ok: true });
 });
 
@@ -397,6 +398,7 @@ app.put("/api/admin/orders/:id/cancel", admin, (req, res) => {
     db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
       .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
   })();
+  notifyOrder(o.id, "cancelled");
   res.json({ ok: true });
 });
 
@@ -583,6 +585,7 @@ app.put("/api/password", requireLogin, (req, res) => {
   if (next === current) return res.status(400).json({ error: "New password must be different." });
 
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(next, 10), req.uid);
+  notify(req.uid, "Password changed", "Your password was just changed. If this wasn't you, please contact us.", "/account/password");
   res.json({ ok: true });
 });
 
@@ -633,6 +636,7 @@ app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
   })();
 
   if (!done) return res.status(400).json({ error: "This order can no longer be cancelled." });
+  notifyAdmins("Order cancelled", "The customer cancelled order #" + o.id + ".", "/admin/orders/" + o.id);
   res.json({ ok: true });
 });
 
@@ -660,6 +664,8 @@ app.post("/api/checkout", requireLogin, (req, res) => {
       db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
       return Number(info.lastInsertRowid);
     })();
+    notifyOrder(orderId, "pending");
+    notifyAdmins("New order", "Order #" + orderId + " is waiting for approval.", "/admin/orders/" + orderId);
     res.json({ orderId });
   } catch {
     res.status(400).json({ error: "Some items just ran out of stock. Please check your cart." });
@@ -820,6 +826,7 @@ app.post("/api/chats", requireCustomer, (req, res) => {
     if (message) addMessage(cid, "customer", req.uid, message);
     return cid;
   })();
+  notifyAdmins("New chat", req.session.user.username + " needs help: " + CHAT_TOPICS[topic], "/admin/chats/" + id);
   res.json({ id });
 });
 
@@ -869,6 +876,8 @@ app.put("/api/admin/chats/:id/claim", admin, (req, res) => {
     const info = db.prepare("UPDATE chats SET admin_id = ? WHERE id = ? AND status = 'open' AND admin_id IS NULL").run(me, id);
     if (info.changes === 0) return false;
     addMessage(id, "system", null, agentName(me) + " has joined the chat and will assist you.");
+    const c = chatInfo(id);   // <-- added
+    notify(c.user_id, "Customer service", agentName(me) + " joined your chat: " + CHAT_TOPICS[c.topic] + ".", "chat:" + id);   // <-- added
     return true;
   })();
   if (!done) return res.status(409).json({ error: "This chat is closed or already claimed by another admin." });
@@ -883,6 +892,9 @@ app.put("/api/admin/chats/:id/release", admin, (req, res) => {
     const info = db.prepare("UPDATE chats SET admin_id = NULL WHERE id = ? AND status = 'open' AND admin_id = ?").run(id, me);
     if (info.changes === 0) return false;
     addMessage(id, "system", null, agentName(me) + " has left the chat. Please wait while another agent takes over.");
+    const c = chatInfo(id);   // <-- added
+    notify(c.user_id, "Customer service", agentName(me) + " left your chat. Another agent will take over soon.", "chat:" + id);   // <-- added
+    notifyAdmins("Chat needs an agent", "A chat about \"" + CHAT_TOPICS[c.topic] + "\" is unclaimed again.", "/admin/chats/" + id, me);   // <-- added
     return true;
   })();
   if (!done) return res.status(409).json({ error: "You haven't claimed this chat." });
@@ -907,6 +919,8 @@ app.put("/api/admin/chats/:id/close", admin, (req, res) => {
   if (!chat) return res.status(404).json({ error: "Chat not found." });
   if (chat.status !== "open" || chat.admin_id !== me) return res.status(409).json({ error: "You can only close a chat you've claimed." });
   endChat(chat.id, agentName(me) + " closed this chat.");
+  const c = chatInfo(chat.id);
+  notify(c.user_id, "Customer service", agentName(me) + " closed your chat: " + CHAT_TOPICS[c.topic] + ".", "chat:" + chat.id);
   res.json({ ok: true });
 });
 
@@ -915,6 +929,61 @@ app.get(
    "/account", "/account/:section", "/purchases", "/purchases/:section"],
   (req, res) => res.sendFile(path.join(__dirname, "public", "index.html"))
 );
+
+// ---------- NOTIFICATIONS ----------
+function notify(userId, title, body, link) {
+  if (!userId) return;
+  db.prepare("INSERT INTO notifications (user_id, title, body, link) VALUES (?, ?, ?, ?)")
+    .run(userId, title, body || "", link || "");
+  // keep only the newest 50 per person
+  db.prepare(`DELETE FROM notifications WHERE user_id = ? AND id NOT IN
+    (SELECT id FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 50)`).run(userId, userId);
+}
+
+function notifyAdmins(title, body, link, exceptId) {
+  db.prepare("SELECT id FROM users WHERE role = 'admin' AND active = 1 AND id != ?").all(exceptId || 0)
+    .forEach(a => notify(a.id, title, body, link));
+}
+
+const ORDER_NOTE = {
+  pending: "was placed and is waiting for approval.",
+  in_progress: "was approved. We're preparing it now.",
+  paid: "payment was received.",
+  packed: "has been packed.",
+  shipped: "is on its way!",
+  delivered: "was delivered. Thank you for shopping with us!",
+  cancelled: "was cancelled.",
+  returned: "was marked as returned."
+};
+
+// Call this whenever an order's status changes
+function notifyOrder(orderId, status) {
+  const o = db.prepare("SELECT user_id FROM orders WHERE id = ?").get(orderId);
+  if (!o || !o.user_id) return; // deleted account
+  const page = status === "delivered" ? "history" : ["cancelled", "returned"].includes(status) ? "returns" : "status";
+  notify(o.user_id, "Order update", "Your order #" + orderId + " " + ORDER_NOTE[status], "/purchases/" + page);
+}
+
+const chatInfo = id => db.prepare("SELECT user_id, topic FROM chats WHERE id = ?").get(id);
+
+app.get("/api/notifications", requireLogin, (req, res) => {
+  res.json({
+    unread: db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND is_read = 0").get(req.uid).n,
+    items: db.prepare(
+      "SELECT id, title, body, link, is_read, created_at FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 30"
+    ).all(req.uid)
+  });
+});
+
+app.put("/api/notifications/read", requireLogin, (req, res) => {
+  db.prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ?").run(req.uid);
+  res.json({ ok: true });
+});
+
+app.put("/api/notifications/:id/read", requireLogin, (req, res) => {
+  db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?").run(Number(req.params.id), req.uid);
+  res.json({ ok: true });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));
