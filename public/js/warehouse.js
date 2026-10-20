@@ -169,11 +169,12 @@ function viewScanner(box) {
 
 // ---------- orders queue ----------
 
-const TABS = [["in_progress", "To pack"], ["packed", "To ship"], ["shipped", "Out for delivery"]];
+const TABS = [["in_progress", "To pack"], ["packed", "To ship"], ["shipped", "Out for delivery"], ["returning", "Returns incoming"]];
 const NEXT = {
   in_progress: ["packed", "Mark packed"],
   packed: ["shipped", "Mark shipped"],
-  shipped: ["delivered", "Mark delivered"]
+  shipped: ["delivered", "Mark delivered"],
+  returning: ["returned", "Mark returned"]
 };
 
 function viewOrders(box) {
@@ -182,24 +183,28 @@ function viewOrders(box) {
   const list = h("div", { class: "list" });
 
   async function load() {
-    const q = new URLSearchParams({ status: tab.value, search: search.value.trim() });
+    const t = tab.value;
+    const q = new URLSearchParams({ status: t, search: search.value.trim() });
     const rows = await api("GET", "/api/warehouse/orders?" + q);
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(card) : ["Nothing here."]));
+    if (rows) list.replaceChildren(...(rows.length ? rows.map(o => card(o, t)) : ["Nothing here."]));
   }
 
   async function move(o, status) {
+    if (status === "returned" &&
+        !(await confirmAction("Mark order #" + o.id + " as returned? Its items go back into stock.", "Mark returned"))) return;
     const r = await api("PUT", `/api/warehouse/orders/${o.id}/status`, { status });
     if (r) toast(r.message, r.ok ? "success" : "error");
     load();
   }
 
-  function card(o) {
-    const [next, text] = NEXT[o.status];
+  function card(o, t) {
+    const [next, text] = NEXT[t];
     return h("div", { class: "row-card" },
       h("div", { class: "row-info" },
-        h("b", {}, "Order #" + o.id, " ", badge(o.status)),
+        h("b", {}, "Order #" + o.id, " ", t === "returning" ? h("span", { class: "badge pending" }, "Return requested") : badge(o.status)),
         h("small", {}, "For: " + (o.recipient || "\u2014")),
-        h("small", {}, o.items.map(i => i.qty + " \u00d7 " + i.name).join(", "))),
+        h("small", {}, o.items.map(i => i.qty + " \u00d7 " + i.name).join(", ")),
+        o.return_reason ? h("small", {}, "Reason: " + o.return_reason) : ""),
       h("div", { class: "row-actions" }, h("button", { class: "primary-btn", onclick: () => move(o, next) }, text)));
   }
 

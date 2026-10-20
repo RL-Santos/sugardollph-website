@@ -149,6 +149,10 @@ if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")
   db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
 }
 
+const orderCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
+if (!orderCols.includes("return_requested_at")) db.exec("ALTER TABLE orders ADD COLUMN return_requested_at TEXT");
+if (!orderCols.includes("return_reason")) db.exec("ALTER TABLE orders ADD COLUMN return_reason TEXT");
+
 // ---------- USERS ----------
 
 const addUser = db.prepare(

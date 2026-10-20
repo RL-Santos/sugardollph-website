@@ -284,7 +284,8 @@ async function viewOrder(box, id) {
       ["Mobile", o.ship_phone || "\u2014"],
       ["Address", o.ship_address || "\u2014"],
       ["Payment", o.payment_method === "COD" ? "Cash on delivery (COD)" : o.payment_method || "\u2014"],
-      ["Placed", when(o.created_at)]
+      ["Placed", when(o.created_at)],
+      ...(o.return_requested_at ? [["Return requested", when(o.return_requested_at) + " \u2014 " + o.return_reason]] : [])
     ];
     box.replaceChildren(
       backLink("/admin/orders", "Back to orders"),

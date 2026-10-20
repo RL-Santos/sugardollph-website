@@ -619,12 +619,60 @@ app.delete("/api/account", requireLogin, (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+const RETURN_DAYS = 7; // how long after delivery a customer can request a return
+const DELIVERED_AT = `COALESCE((SELECT created_at FROM activity_log
+  WHERE order_id = orders.id AND to_status = 'delivered' ORDER BY id DESC LIMIT 1), created_at)`;
+const withinReturnWindow = s => Date.now() - Date.parse(s.replace(" ", "T") + "Z") <= RETURN_DAYS * 86400000;
+
 app.get("/api/orders", requireLogin, (req, res) => {
   const orders = db.prepare(
-    "SELECT id, status, total, payment_method, created_at FROM orders WHERE user_id = ? ORDER BY id DESC"
+    `SELECT id, status, total, payment_method, created_at, return_requested_at, return_reason,
+       ${DELIVERED_AT} AS delivered_at
+     FROM orders WHERE user_id = ? ORDER BY id DESC`
   ).all(req.uid);
   const items = db.prepare("SELECT name, price, qty FROM order_items WHERE order_id = ?");
-  res.json(orders.map(o => ({ ...o, items: items.all(o.id) })));
+  res.json(orders.map(o => ({
+    ...o,
+    can_return: o.status === "delivered" && !o.return_requested_at && withinReturnWindow(o.delivered_at),
+    items: items.all(o.id)
+  })));
+});
+
+// The customer confirms the parcel arrived
+app.put("/api/orders/:id/received", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const done = db.transaction(() => {
+    const info = db.prepare("UPDATE orders SET status = 'delivered' WHERE id = ? AND user_id = ? AND status = 'shipped'")
+      .run(id, req.uid);
+    if (info.changes === 0) return false;
+    logActivity(req.uid, "customer", "order", "Order #" + id + " received by the customer", id, "delivered", "customer");
+    return true;
+  })();
+  if (!done) return res.status(400).json({ error: "This order can't be marked as received." });
+  res.json({ ok: true });
+});
+
+// The customer asks to send a delivered order back. The warehouse finishes it by scanning the parcel as Returned.
+app.put("/api/orders/:id/return", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const reason = String(req.body.reason || "").trim().slice(0, 200);
+  if (reason.length < 3) return res.status(400).json({ error: "Please tell us why you're returning it." });
+  const o = db.prepare(
+    `SELECT status, return_requested_at, ${DELIVERED_AT} AS delivered_at FROM orders WHERE id = ? AND user_id = ?`
+  ).get(id, req.uid);
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  if (o.status !== "delivered") return res.status(400).json({ error: "Only delivered orders can be returned." });
+  if (o.return_requested_at) return res.status(400).json({ error: "A return was already requested for this order." });
+  if (!withinReturnWindow(o.delivered_at)) {
+    return res.status(400).json({ error: "Returns are accepted within " + RETURN_DAYS + " days of delivery." });
+  }
+  db.transaction(() => {
+    db.prepare("UPDATE orders SET return_requested_at = CURRENT_TIMESTAMP, return_reason = ? WHERE id = ?").run(reason, id);
+    logActivity(req.uid, "customer", "order", "Return requested for order #" + id + ": " + reason, id, null, "customer");
+  })();
+  notifyAdmins("Return requested", "Order #" + id + ": " + reason, "/admin/orders/" + id);
+  notifyWarehouse("Return incoming", "Order #" + id + " is being returned. Scan it as Returned when it arrives.", "/warehouse/orders");
+  res.json({ ok: true });
 });
 
 app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
@@ -966,7 +1014,7 @@ const ORDER_NOTE = {
   shipped: "is on its way!",
   delivered: "was delivered. Thank you for shopping with us!",
   cancelled: "was cancelled.",
-  returned: "was marked as returned."
+  returned: "was received back at the shop. Thank you!"
 };
 
 // Call this whenever an order's status changes
@@ -1024,7 +1072,7 @@ function logActivity(userId, role, type, summary, orderId, toStatus, method) {
 
 // Moves an order to `status` for a warehouse user
 function whMove(orderId, status, uid, method) {
-  const o = db.prepare("SELECT id, status, ship_name FROM orders WHERE id = ?").get(orderId);
+  const o = db.prepare("SELECT id, status, ship_name, return_requested_at FROM orders WHERE id = ?").get(orderId);
   if (!o) return { ok: false, kind: "unknown", message: "Order not found." };
   const order = {
     id: o.id, status: o.status, recipient: o.ship_name,
@@ -1038,6 +1086,10 @@ function whMove(orderId, status, uid, method) {
       "SELECT actor FROM activity_log WHERE order_id = ? AND to_status = ? ORDER BY id DESC LIMIT 1").get(o.id, status);
     return { ok: false, kind: "wrong_step", order,
       message: "Order #" + o.id + " is already marked " + status + (prev ? " (by " + prev.actor + ")" : "") + "." };
+  }
+  if (status === "returned" && o.status === "delivered" && !o.return_requested_at) {
+    return { ok: false, kind: "wrong_step", order,
+      message: "Order #" + o.id + " was delivered and the customer hasn't requested a return." };
   }
   const from = WH_FLOW[status];
   if (!from.includes(o.status)) {
@@ -1061,7 +1113,8 @@ function whMove(orderId, status, uid, method) {
   if (!moved) return { ok: false, kind: "wrong_step", order, message: "Order #" + o.id + " just changed. Scan it again." };
   notifyOrder(o.id, status); // tells the customer
   order.status = status;
-  return { ok: true, kind: "done", order, by: agentName(uid), message: "Order #" + o.id + " marked " + status + "." };
+  return { ok: true, kind: "done", order, by: agentName(uid),
+    message: "Order #" + o.id + " marked " + status + (status === "returned" ? ". Items are back in stock." : ".") };
 }
 
 // ----- warehouse -----
@@ -1084,13 +1137,15 @@ app.put("/api/warehouse/orders/:id/status", requireWarehouse, (req, res) => {
 
 // Orders queue: warehouse sees order #, recipient and items only\\
 app.get("/api/warehouse/orders", requireWarehouse, (req, res) => {
-  const status = ["in_progress", "packed", "shipped"].includes(req.query.status) ? req.query.status : "in_progress";
+  const status = ["in_progress", "packed", "shipped", "returning"].includes(req.query.status) ? req.query.status : "in_progress";
   const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
+  const returning = status === "returning";
   const items = db.prepare("SELECT name, qty FROM order_items WHERE order_id = ?");
   res.json(db.prepare(
-    `SELECT id, status, ship_name AS recipient, created_at FROM orders
-     WHERE status = ? AND (CAST(id AS TEXT) LIKE ? OR COALESCE(ship_name, '') LIKE ?) ORDER BY id`
-  ).all(status, q, q).map(o => ({ ...o, items: items.all(o.id) })));
+    `SELECT id, status, ship_name AS recipient, return_reason, created_at FROM orders
+     WHERE ${returning ? "status = 'delivered' AND return_requested_at IS NOT NULL" : "status = ?"}
+       AND (CAST(id AS TEXT) LIKE ? OR COALESCE(ship_name, '') LIKE ?) ORDER BY id`
+  ).all(...(returning ? [] : [status]), q, q).map(o => ({ ...o, items: items.all(o.id) })));
 });
 
 app.put("/api/warehouse/stock/:id", requireWarehouse, (req, res) => {
@@ -1139,6 +1194,25 @@ app.get("/api/admin/orders/:id/qr", admin, async (req, res) => {
   }
   res.json({ svg: await QRCode.toString("SD-" + token, { type: "svg", margin: 1, errorCorrectionLevel: "M" }) });
 });
+
+// ---------- delete chats with no activity for 14 days ----------
+const CHAT_KEEP_DAYS = 14;
+
+function purgeOldChats() {
+  db.transaction(() => {
+    // messages are deleted with their chat (ON DELETE CASCADE)
+    db.prepare("DELETE FROM chats WHERE updated_at < datetime('now', ?)").run("-" + CHAT_KEEP_DAYS + " days");
+    // drop bell notifications that point to a chat that no longer exists
+    db.prepare(
+      `DELETE FROM notifications
+       WHERE (link LIKE 'chat:%' AND CAST(substr(link, 6) AS INTEGER) NOT IN (SELECT id FROM chats))
+          OR (link LIKE '/admin/chats/%' AND CAST(substr(link, 14) AS INTEGER) NOT IN (SELECT id FROM chats))`
+    ).run();
+  })();
+}
+
+purgeOldChats();                                // once when the server starts
+setInterval(purgeOldChats, 60 * 60 * 1000);     // then every hour
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));

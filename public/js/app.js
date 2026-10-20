@@ -807,6 +807,7 @@ function renderOrderList(box, title, orders, emptyText) {
     return;
   }
   orders.forEach(o => {
+    const returning = o.status === "delivered" && !!o.return_requested_at;
     const card = document.createElement("div");
     card.className = "order-card";
 
@@ -816,11 +817,13 @@ function renderOrderList(box, title, orders, emptyText) {
     idText.textContent = "Order #" + o.id;
     const badge = document.createElement("span");
     badge.className = "badge";
-    badge.textContent = o.status.replace("_", " ");
+    badge.textContent = returning ? "return requested" : o.status.replace("_", " ");
     head.append(idText, badge);
 
     const statusLine = document.createElement("small");
-    statusLine.textContent = STATUS_TEXT[o.status] || o.status;
+    statusLine.textContent = returning
+      ? "Return requested. Waiting for the parcel to reach the shop."
+      : (STATUS_TEXT[o.status] || o.status);
 
     const date = document.createElement("small");
     date.textContent = new Date(o.created_at.replace(" ", "T") + "Z").toLocaleDateString();
@@ -835,6 +838,12 @@ function renderOrderList(box, title, orders, emptyText) {
     total.textContent = "Total: PHP " + o.total.toFixed(2);
     card.appendChild(total);
 
+    if (returning) {
+      const why = document.createElement("small");
+      why.textContent = "Reason: " + o.return_reason;
+      card.appendChild(why);
+    }
+
     if (o.status === "pending" || o.status === "in_progress") {
       card.appendChild(makeButton("Cancel order", async () => {
         if (!(await confirmAction("Cancel order #" + o.id + "?", "Cancel order", "Keep order"))) return;
@@ -844,24 +853,58 @@ function renderOrderList(box, title, orders, emptyText) {
         }
       }, "danger-btn"));
     }
+
+    if (o.status === "shipped") {
+      card.appendChild(makeButton("I received my order", async () => {
+        if (!(await confirmAction("Confirm that you received order #" + o.id + "?", "Yes, I got it", "Not yet"))) return;
+        if (await send("PUT", "/api/orders/" + o.id + "/received", {})) {
+          showToast("Thanks! Order marked as received.", "success");
+          navigate("/purchases/history");
+        }
+      }));
+    }
+
+    if (o.can_return) {
+      const returnBtn = makeButton("Return this order", () => {
+        returnBtn.remove();
+        const reason = document.createElement("textarea");
+        reason.className = "chat-text";
+        reason.maxLength = 200;
+        reason.placeholder = "Why are you returning it?";
+        const actions = document.createElement("div");
+        actions.className = "address-actions";
+        actions.append(
+          makeButton("Send return request", async () => {
+            if (await send("PUT", "/api/orders/" + o.id + "/return", { reason: reason.value })) {
+              showToast("Return requested. Please send the parcel back to the shop.", "success");
+              navigate("/purchases/returns");
+            }
+          }),
+          makeButton("Cancel", route, "secondary-btn")
+        );
+        card.append(reason, actions);
+      }, "secondary-btn");
+      card.appendChild(returnBtn);
+    }
     box.appendChild(card);
   });
+}
+
+async function renderHistory(box) {
+  const orders = (await loadOrders()).filter(o => o.status === "delivered" && !o.return_requested_at);
+  renderOrderList(box, "Order history", orders, "No completed orders yet.");
+}
+
+async function renderReturns(box) {
+  const orders = (await loadOrders()).filter(o =>
+    ["cancelled", "returned"].includes(o.status) || (o.status === "delivered" && o.return_requested_at));
+  renderOrderList(box, "Cancelled & returns", orders, "No cancelled or returned orders.");
 }
 
 async function renderStatus(box) {
   const active = ["pending", "in_progress", "paid", "packed", "shipped"];
   const orders = (await loadOrders()).filter(o => active.includes(o.status));
   renderOrderList(box, "Order status", orders, "You have no orders in progress.");
-}
-
-async function renderHistory(box) {
-  const orders = (await loadOrders()).filter(o => o.status === "delivered");
-  renderOrderList(box, "Order history", orders, "No completed orders yet.");
-}
-
-async function renderReturns(box) {
-  const orders = (await loadOrders()).filter(o => ["cancelled", "returned"].includes(o.status));
-  renderOrderList(box, "Cancelled & returns", orders, "No cancelled or returned orders.");
 }
 
 const SECTIONS = {

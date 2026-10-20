@@ -409,6 +409,7 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #222; }
 .danger-btn:hover { background: #8e001a; }
 
 .order-card .danger-btn { align-self: flex-start; }
+.order-card .primary-btn, .order-card .secondary-btn { align-self: flex-start; width: auto; }
 
 .order-card {
   display: flex;
