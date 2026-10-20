@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
+const QRCode = require("qrcode");
 
 const multer = require("multer");
 const crypto = require("crypto");
@@ -202,7 +203,7 @@ const ACTIVE_ORDER = ["pending", "in_progress", "paid", "packed", "shipped"];
 const REVENUE_ORDER = ["in_progress", "paid", "packed", "shipped", "delivered"];
 
 app.get(["/admin", "/admin/users", "/admin/users/:id", "/admin/products", "/admin/orders", "/admin/orders/:id",
-         "/admin/chats", "/admin/chats/:id"],
+         "/admin/logs", "/admin/chats", "/admin/chats/:id"],
   requirePageRole("admin"),
   (req, res) => res.sendFile(path.join(__dirname, "private", "admin.html")));
 
@@ -385,6 +386,8 @@ app.put("/api/admin/orders/:id/approve", admin, (req, res) => {
   if (o.status !== "pending") return res.status(400).json({ error: "Only pending orders can be approved." });
   db.prepare("UPDATE orders SET status = 'in_progress' WHERE id = ?").run(o.id);
   notifyOrder(o.id, "in_progress");
+  notifyWarehouse("New order to pack", "Order #" + o.id + " is ready to pack.", "/warehouse/orders");
+  logActivity(adminIdOf(req), "admin", "order", "Order #" + o.id + " approved", o.id, "in_progress", "manual");
   res.json({ ok: true });
 });
 
@@ -399,12 +402,16 @@ app.put("/api/admin/orders/:id/cancel", admin, (req, res) => {
       .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
   })();
   notifyOrder(o.id, "cancelled");
+  if (o.status !== "pending") notifyWarehouse("Order cancelled", "Order #" + o.id + " was cancelled. Don't ship it.", "/warehouse/orders");
+  logActivity(adminIdOf(req), "admin", "order", "Order #" + o.id + " cancelled by admin", o.id, "cancelled", "manual");
   res.json({ ok: true });
 });
 
-app.get("/warehouse", requirePageRole("warehouse"), (req, res) => {
-  res.sendFile(path.join(__dirname, "private", "warehouse.html"));
-});
+// ----- warehouse routes -----------
+app.get(["/warehouse", "/warehouse/orders", "/warehouse/stock", "/warehouse/activity"],
+  requirePageRole("warehouse"),
+  (req, res) => res.sendFile(path.join(__dirname, "private", "warehouse.html")
+));
 
 // Search products by name and/or category. Empty values return everything.
 const CATEGORIES = ["jeans", "trousers", "tops", "others"];
@@ -636,6 +643,7 @@ app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
   })();
 
   if (!done) return res.status(400).json({ error: "This order can no longer be cancelled." });
+  logActivity(req.uid, "customer", "order", "Order #" + o.id + " cancelled by the customer", o.id, "cancelled", "manual");   // <-- add
   notifyAdmins("Order cancelled", "The customer cancelled order #" + o.id + ".", "/admin/orders/" + o.id);
   res.json({ ok: true });
 });
@@ -945,6 +953,11 @@ function notifyAdmins(title, body, link, exceptId) {
     .forEach(a => notify(a.id, title, body, link));
 }
 
+function notifyWarehouse(title, body, link) {
+  db.prepare("SELECT id FROM users WHERE role = 'warehouse' AND active = 1").all()
+    .forEach(w => notify(w.id, title, body, link));
+}
+
 const ORDER_NOTE = {
   pending: "was placed and is waiting for approval.",
   in_progress: "was approved. We're preparing it now.",
@@ -983,6 +996,148 @@ app.put("/api/notifications/read", requireLogin, (req, res) => {
 app.put("/api/notifications/:id/read", requireLogin, (req, res) => {
   db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?").run(Number(req.params.id), req.uid);
   res.json({ ok: true });
+});
+
+// ---------- WAREHOUSE + LOGS + QR LABELS ----------
+
+// What each scan mode is allowed to move an order from
+const WH_FLOW = {
+  packed: ["in_progress"],
+  shipped: ["packed"],
+  delivered: ["shipped"],
+  returned: ["shipped", "delivered"]
+};
+
+function requireWarehouse(req, res, next) {
+  requireLogin(req, res, () => {
+    if (req.session.user.role !== "warehouse") return res.status(403).json({ error: "Not allowed" });
+    next();
+  });
+}
+
+function logActivity(userId, role, type, summary, orderId, toStatus, method) {
+  db.prepare(
+    `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(userId, agentName(userId), role, type, orderId || null, toStatus || null, method || null, summary);
+}
+
+// Moves an order to `status` for a warehouse user
+function whMove(orderId, status, uid, method) {
+  const o = db.prepare("SELECT id, status, ship_name FROM orders WHERE id = ?").get(orderId);
+  if (!o) return { ok: false, kind: "unknown", message: "Order not found." };
+  const order = {
+    id: o.id, status: o.status, recipient: o.ship_name,
+    items: db.prepare("SELECT name, qty FROM order_items WHERE order_id = ?").all(o.id)
+  };
+  if (o.status === "cancelled") {
+    return { ok: false, kind: "cancelled", order, message: "Order #" + o.id + " was CANCELLED. Do not pack or ship it." };
+  }
+  if (o.status === status) {
+    const prev = db.prepare(
+      "SELECT actor FROM activity_log WHERE order_id = ? AND to_status = ? ORDER BY id DESC LIMIT 1").get(o.id, status);
+    return { ok: false, kind: "wrong_step", order,
+      message: "Order #" + o.id + " is already marked " + status + (prev ? " (by " + prev.actor + ")" : "") + "." };
+  }
+  const from = WH_FLOW[status];
+  if (!from.includes(o.status)) {
+    return { ok: false, kind: "wrong_step", order,
+      message: "Order #" + o.id + " is \"" + o.status.replace("_", " ") + "\", so it can't be marked " + status + " yet." };
+  }
+  const moved = db.transaction(() => {
+    const info = db.prepare(`UPDATE orders SET status = ? WHERE id = ? AND status IN (${from.map(() => "?").join(",")})`)
+      .run(status, o.id, ...from);
+    if (info.changes === 0) return false;
+    if (status === "returned") { // returned parcels go back on the shelf
+      const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
+      db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
+        .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
+    }
+    logActivity(uid, "warehouse", "order",
+      "Order #" + o.id + " marked " + status + (status === "returned" ? " (items returned to stock)" : ""),
+      o.id, status, method);
+    return true;
+  })();
+  if (!moved) return { ok: false, kind: "wrong_step", order, message: "Order #" + o.id + " just changed. Scan it again." };
+  notifyOrder(o.id, status); // tells the customer
+  order.status = status;
+  return { ok: true, kind: "done", order, by: agentName(uid), message: "Order #" + o.id + " marked " + status + "." };
+}
+
+// ----- warehouse -----
+app.post("/api/warehouse/scan", requireWarehouse, (req, res) => {
+  const code = String(req.body.code || "").trim();
+  const status = String(req.body.status || "");
+  if (!Object.hasOwn(WH_FLOW, status)) return res.status(400).json({ error: "Pick what you're doing first." });
+  const token = code.startsWith("SD-") ? code.slice(3) : "";
+  const o = token && db.prepare("SELECT id FROM orders WHERE scan_token = ?").get(token);
+  if (!o) return res.json({ ok: false, kind: "unknown", message: "That QR code isn't a Sugardoll order label." });
+  res.json(whMove(o.id, status, req.uid, "scan"));
+});
+
+// Manual fallback when a label won't scan
+app.put("/api/warehouse/orders/:id/status", requireWarehouse, (req, res) => {
+  const status = String(req.body.status || "");
+  if (!Object.hasOwn(WH_FLOW, status)) return res.status(400).json({ error: "Unknown status." });
+  res.json(whMove(Number(req.params.id), status, req.uid, "manual"));
+});
+
+// Orders queue: warehouse sees order #, recipient and items only\\
+app.get("/api/warehouse/orders", requireWarehouse, (req, res) => {
+  const status = ["in_progress", "packed", "shipped"].includes(req.query.status) ? req.query.status : "in_progress";
+  const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
+  const items = db.prepare("SELECT name, qty FROM order_items WHERE order_id = ?");
+  res.json(db.prepare(
+    `SELECT id, status, ship_name AS recipient, created_at FROM orders
+     WHERE status = ? AND (CAST(id AS TEXT) LIKE ? OR COALESCE(ship_name, '') LIKE ?) ORDER BY id`
+  ).all(status, q, q).map(o => ({ ...o, items: items.all(o.id) })));
+});
+
+app.put("/api/warehouse/stock/:id", requireWarehouse, (req, res) => {
+  const p = db.prepare("SELECT id, name, amount FROM products WHERE id = ?").get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: "Product not found." });
+  const mode = req.body.mode === "set" ? "set" : "add";
+  const n = Number(req.body.qty);
+  if (!Number.isInteger(n) || n < (mode === "add" ? 1 : 0) || n > 100000) {
+    return res.status(400).json({ error: mode === "add" ? "Enter a whole number of 1 or more." : "Enter a whole number, 0 or more." });
+  }
+  const reason = String(req.body.reason || "").trim().slice(0, 60) || (mode === "add" ? "Incoming stock" : "Recount");
+  const next = mode === "add" ? p.amount + n : n;
+  db.transaction(() => {
+    db.prepare("UPDATE products SET amount = ? WHERE id = ?").run(next, p.id);
+    logActivity(req.uid, "warehouse", "stock", p.name + ": " + p.amount + " \u2192 " + next + " (" + reason + ")", null, null, mode);
+  })();
+  res.json({ id: p.id, amount: next });
+});
+
+app.get("/api/warehouse/activity", requireWarehouse, (req, res) => {
+  res.json(db.prepare(
+    "SELECT id, type, order_id, method, summary, created_at FROM activity_log WHERE user_id = ? ORDER BY id DESC LIMIT 50"
+  ).all(req.uid));
+});
+
+// ----- admin logs + QR label -----
+app.get("/api/admin/logs", admin, (req, res) => {
+  const type = ["order", "stock"].includes(req.query.type) ? req.query.type : "";
+  const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
+  res.json(db.prepare(
+    `SELECT id, actor, role, type, order_id, method, summary, created_at FROM activity_log
+     WHERE (? = '' OR type = ?)
+       AND (actor LIKE ? OR summary LIKE ? OR CAST(COALESCE(order_id, '') AS TEXT) LIKE ?)
+     ORDER BY id DESC LIMIT 200`
+  ).all(type, type, q, q, q));
+});
+
+// The QR holds a random token (never the order number)
+app.get("/api/admin/orders/:id/qr", admin, async (req, res) => {
+  const o = db.prepare("SELECT id, scan_token FROM orders WHERE id = ?").get(Number(req.params.id));
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  let token = o.scan_token;
+  if (!token) {
+    token = crypto.randomBytes(16).toString("hex");
+    db.prepare("UPDATE orders SET scan_token = ? WHERE id = ?").run(token, o.id);
+  }
+  res.json({ svg: await QRCode.toString("SD-" + token, { type: "svg", margin: 1, errorCorrectionLevel: "M" }) });
 });
 
 const PORT = process.env.PORT || 3000;

@@ -119,11 +119,31 @@ db.exec(`
     is_read INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
-  
+
+  CREATE TABLE IF NOT EXISTS activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    actor TEXT NOT NULL,
+    role TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('order', 'stock')),
+    order_id INTEGER,
+    to_status TEXT,
+    method TEXT,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_activity_order ON activity_log(order_id);
+
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, id);
 
   CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
 `);
+
+if (!db.prepare("PRAGMA table_info(orders)").all().some(c => c.name === "scan_token")) {
+  db.exec("ALTER TABLE orders ADD COLUMN scan_token TEXT");
+}
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_scan_token ON orders(scan_token)");
 
 if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")) {
   db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");

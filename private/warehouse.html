@@ -4,18 +4,40 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Warehouse - Sugardoll Clothing Shop</title>
+<link rel="icon" href="/images/SugardollIcon.jpg">
+<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/admin.css">
 </head>
-<body>
+<body class="shop admin">
 
-<h1>Warehouse</h1>
-<p><a href="/">Back to shop</a></p>
-<hr>
+<aside id="sidebar">
+  <a class="side-logo" href="/warehouse" data-nav><img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo"></a>
+  <nav>
+    <a href="/warehouse" data-nav>Scanner</a>
+    <a href="/warehouse/orders" data-nav>Orders</a>
+    <a href="/warehouse/stock" data-nav>Stock</a>
+    <a href="/warehouse/activity" data-nav>My activity</a>
+  </nav>
+  <a class="back-link" href="/">&larr; Back to shop</a>
+</aside>
 
-<ul>
-  <li>Incoming stock</li>
-  <li>Orders to pack</li>
-  <li>Update inventory counts</li>
-</ul>
+<button id="sidebar-toggle" aria-label="Hide or show the menu">&#9776;</button>
+<div id="bell-wrap" class="bell-wrap bell-fixed" hidden>
+  <button id="bell-btn" class="bell-btn" aria-label="Notifications">&#128276;<span id="bell-count" hidden></span></button>
+  <div id="notif-panel" hidden></div>
+</div>
+<main id="main"></main>
 
+<div id="confirm-overlay" hidden>
+  <div id="confirm-box">
+    <p id="confirm-text"></p>
+    <button id="confirm-no">Cancel</button>
+    <button id="confirm-yes" class="primary-btn">OK</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="/js/warehouse.js"></script>
+<script src="/js/notifications.js"></script>
 </body>
 </html>
