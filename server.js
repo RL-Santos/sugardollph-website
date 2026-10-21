@@ -166,6 +166,41 @@ app.post("/api/register", (req, res) => {
   res.json(req.session.user);
 });
 
+const resetTries = new Map();
+function tooManyResets(key) {
+  const now = Date.now();
+  const t = resetTries.get(key);
+  if (!t || t.until < now) { resetTries.set(key, { n: 1, until: now + 15 * 60 * 1000 }); return false; }
+  return ++t.n > 5; // 5 tries per username every 15 minutes
+}
+
+app.post("/api/forgot-password", (req, res) => {
+  const text = k => String(req.body[k] || "").trim();
+  const username = text("username");
+  const email = text("email").toLowerCase();
+  const phone = cleanPhone(req.body.phone);
+  const password = String(req.body.new_password || "");
+
+  const problem = checkPassword(password);
+  if (problem) return res.status(400).json({ error: problem });
+  if (tooManyResets(username.toLowerCase())) {
+    return res.status(429).json({ error: "Too many attempts. Please try again in 15 minutes." });
+  }
+
+  const u = db.prepare(
+    `SELECT u.id, u.role, u.active, p.email, p.phone FROM users u
+     JOIN customer_profiles p ON p.user_id = u.id WHERE lower(u.username) = lower(?)`).get(username);
+  if (!u || u.role !== "customer" || !u.active || !email || !phone ||
+      u.email.toLowerCase() !== email || u.phone !== phone) {
+    return res.status(400).json({ error: "Those details don't match our records." });
+  }
+
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(password, 10), u.id);
+  notify(u.id, "Password reset", "Your password was reset. If this wasn't you, please contact us.", "/account/password");
+  resetTries.delete(username.toLowerCase());
+  res.json({ ok: true });
+});
+
 // Log out
 app.post("/api/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
@@ -232,7 +267,8 @@ app.get("/api/admin/overview", admin, (req, res) => {
     lowStock: db.prepare("SELECT name, amount FROM products WHERE amount <= 5 ORDER BY amount, name LIMIT 8").all(),
     recent: db.prepare(
       `SELECT o.id, o.status, o.total, COALESCE(u.username, o.ship_name, 'Deleted account') AS customer
-       FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 5`).all()
+       FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 5`).all(),
+    requests: db.prepare("SELECT COUNT(*) AS n FROM orders WHERE cancel_status = 'pending' OR return_status = 'pending'").get().n,
   });
 });
 
@@ -369,9 +405,10 @@ app.get("/api/admin/orders", admin, (req, res) => {
   const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
   const status = String(req.query.status || "");
   res.json(loadOrders(
-    `WHERE (? = '' OR o.status = ?)
+    `WHERE (? = '' OR ? = 'requests' OR o.status = ?)
+       AND (? = 0 OR o.cancel_status = 'pending' OR o.return_status = 'pending')
        AND (CAST(o.id AS TEXT) LIKE ? OR COALESCE(u.username, '') LIKE ? OR COALESCE(o.ship_name, '') LIKE ?)`,
-    status, status, q, q, q));
+    status, status, status, status === "requests" ? 1 : 0, q, q, q));
 });
 
 app.get("/api/admin/orders/:id", admin, (req, res) => {
@@ -396,7 +433,7 @@ app.put("/api/admin/orders/:id/cancel", admin, (req, res) => {
   if (!o) return res.status(404).json({ error: "Order not found." });
   if (!ACTIVE_ORDER.includes(o.status)) return res.status(400).json({ error: "This order can't be cancelled." });
   db.transaction(() => {
-    db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(o.id);
+    db.prepare("UPDATE orders SET status = 'cancelled', cancel_status = CASE WHEN cancel_status = 'pending' THEN 'approved' ELSE cancel_status END WHERE id = ?").run(o.id);
     const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
     db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
       .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
@@ -627,12 +664,13 @@ const withinReturnWindow = s => Date.now() - Date.parse(s.replace(" ", "T") + "Z
 app.get("/api/orders", requireLogin, (req, res) => {
   const orders = db.prepare(
     `SELECT id, status, total, payment_method, created_at, return_requested_at, return_reason,
-       ${DELIVERED_AT} AS delivered_at
+       cancel_status, cancel_reason, return_status, ${DELIVERED_AT} AS delivered_at
      FROM orders WHERE user_id = ? ORDER BY id DESC`
   ).all(req.uid);
   const items = db.prepare("SELECT name, price, qty FROM order_items WHERE order_id = ?");
   res.json(orders.map(o => ({
     ...o,
+    can_cancel: ["pending", "in_progress"].includes(o.status) && !o.cancel_status,
     can_return: o.status === "delivered" && !o.return_requested_at && withinReturnWindow(o.delivered_at),
     items: items.all(o.id)
   })));
@@ -667,40 +705,40 @@ app.put("/api/orders/:id/return", requireLogin, (req, res) => {
     return res.status(400).json({ error: "Returns are accepted within " + RETURN_DAYS + " days of delivery." });
   }
   db.transaction(() => {
-    db.prepare("UPDATE orders SET return_requested_at = CURRENT_TIMESTAMP, return_reason = ? WHERE id = ?").run(reason, id);
+    db.prepare("UPDATE orders SET return_requested_at = CURRENT_TIMESTAMP, return_status = 'pending', return_reason = ? WHERE id = ?").run(reason, id);
     logActivity(req.uid, "customer", "order", "Return requested for order #" + id + ": " + reason, id, null, "customer");
   })();
   notifyAdmins("Return requested", "Order #" + id + ": " + reason, "/admin/orders/" + id);
-  notifyWarehouse("Return incoming", "Order #" + id + " is being returned. Scan it as Returned when it arrives.", "/warehouse/orders");
   res.json({ ok: true });
 });
 
 app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
-  const o = db.prepare("SELECT id FROM orders WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  const id = Number(req.params.id);
+  const reason = String(req.body.reason || "").trim().slice(0, 200);
+  const o = db.prepare("SELECT id, status, cancel_status FROM orders WHERE id = ? AND user_id = ?").get(id, req.uid);
   if (!o) return res.status(404).json({ error: "Order not found." });
-
-  const done = db.transaction(() => {
-    const info = db.prepare(
-      "UPDATE orders SET status = 'cancelled' WHERE id = ? AND status IN ('pending','in_progress')"
-    ).run(o.id);
-    if (info.changes === 0) return false; // already moved past in_progress, or already cancelled
-    const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
-    db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
-      .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
-    return true;
+  if (!["pending", "in_progress"].includes(o.status)) return res.status(400).json({ error: "This order can no longer be cancelled." });
+  if (o.cancel_status) return res.status(400).json({ error: "You already asked to cancel this order." });
+  db.transaction(() => {
+    db.prepare("UPDATE orders SET cancel_status = 'pending', cancel_requested_at = CURRENT_TIMESTAMP, cancel_reason = ? WHERE id = ?")
+      .run(reason, id);
+    logActivity(req.uid, "customer", "order", "Cancellation requested for order #" + id + (reason ? ": " + reason : ""), id, null, "customer");
   })();
-
-  if (!done) return res.status(400).json({ error: "This order can no longer be cancelled." });
-  logActivity(req.uid, "customer", "order", "Order #" + o.id + " cancelled by the customer", o.id, "cancelled", "manual");   // <-- add
-  notifyAdmins("Order cancelled", "The customer cancelled order #" + o.id + ".", "/admin/orders/" + o.id);
+  notifyAdmins("Cancellation requested", "Order #" + id + (reason ? ": " + reason : ""), "/admin/orders/" + id);
   res.json({ ok: true });
 });
 
 app.post("/api/checkout", requireLogin, (req, res) => {
   const cart = readCart(req.uid);
   if (cart.length === 0) return res.status(400).json({ error: "Your cart is empty." });
-  const addr = db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id LIMIT 1").get(req.uid);
-  if (!addr) return res.status(400).json({ error: "Add a delivery address in your account first." });
+  if (String(req.body.payment_method || "COD") !== "COD") {
+    return res.status(400).json({ error: "Only cash on delivery is available right now." });
+  }
+  const addrId = Number(req.body.address_id);
+  const addr = addrId
+    ? db.prepare("SELECT * FROM addresses WHERE id = ? AND user_id = ?").get(addrId, req.uid)
+    : db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id LIMIT 1").get(req.uid);
+  if (!addr) return res.status(400).json({ error: "Pick a delivery address." });
 
   const total = cart.reduce((n, i) => n + i.price * i.qty, 0);
   const shipAddress = [addr.street, addr.barangay, addr.city, addr.province, addr.postal_code].filter(Boolean).join(", ");
@@ -787,6 +825,33 @@ app.delete("/api/addresses/:id", requireLogin, (req, res) => {
 });
 
 // ---------- CUSTOMER SERVICE CHAT ----------
+const AUTO_TOPICS = ["order_status", "cancel_order", "return_refund", "account"];
+
+// Instant answers to common questions. Stored as an "admin" message with no sender id = Sugardoll Assistant.
+function autoReply(topic, uid) {
+  let text = null;
+  if (topic === "order_status") {
+    const rows = db.prepare("SELECT id, status, cancel_status FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 3").all(uid);
+    text = rows.length
+      ? "Here are your latest orders:\n" + rows.map(o => "\u2022 Order #" + o.id + " " + ORDER_NOTE[o.status] +
+          (o.cancel_status === "pending" ? " (A cancellation request is waiting for review.)" : "")).join("\n") +
+        "\n\nYou can always check this under Purchases > Order status."
+      : "You don't have any orders yet. Once you place one, you can track it under Purchases > Order status.";
+  } else if (topic === "cancel_order") {
+    const ids = db.prepare("SELECT id FROM orders WHERE user_id = ? AND status IN ('pending', 'in_progress') AND cancel_status IS NULL ORDER BY id DESC")
+      .all(uid).map(o => "#" + o.id);
+    text = "To cancel, open Purchases > Order status and tap \"Request cancellation\" on the order. An admin reviews it and you'll get a notification. " +
+      "Orders already packed or shipped can't be cancelled, but you can request a return after they arrive.\n\n" +
+      (ids.length ? "Orders you can ask to cancel right now: " + ids.join(", ") + "." : "You have no orders that can be cancelled right now.");
+  } else if (topic === "return_refund") {
+    text = "To return an order, open Purchases > Order history within " + RETURN_DAYS + " days of delivery and tap \"Return this order\". " +
+      "An admin reviews the request first. Once approved, send the parcel back to the shop and we'll update your order when it arrives.";
+  } else if (topic === "account") {
+    text = "You can change your details under Account > Profile, manage delivery addresses under Account > Addresses, and change your password under Account > Change password.";
+  }
+  return text && text + "\n\nGot what you need? Tap \"End chat\" above. Otherwise an agent will join shortly.";
+}
+
 const CHAT_TOPICS = {
   order_status: "Where is my order?",
   cancel_order: "Cancel or change an order",
@@ -832,7 +897,7 @@ function addMessage(chatId, sender, senderId, body) {
 // Messages newer than `after`. Admin messages carry the admin's first name.
 function chatMessages(chatId, after) {
   return db.prepare(
-    `SELECT m.id, m.sender, m.body, m.created_at, COALESCE(NULLIF(p.first_name, ''), u.username) AS name
+    `SELECT m.id, m.sender, m.body, m.created_at, COALESCE(NULLIF(p.first_name, ''), u.username, 'Sugardoll Assistant') AS name
      FROM chat_messages m
      LEFT JOIN users u ON u.id = m.sender_id AND m.sender = 'admin'
      LEFT JOIN customer_profiles p ON p.user_id = u.id
@@ -879,10 +944,15 @@ app.post("/api/chats", requireCustomer, (req, res) => {
   const id = db.transaction(() => {
     const cid = Number(db.prepare("INSERT INTO chats (user_id, topic) VALUES (?, ?)").run(req.uid, topic).lastInsertRowid);
     addMessage(cid, "system", null, "Thanks for reaching out! An agent will join this chat shortly.");
+    const auto = autoReply(topic, req.uid);
+    if (auto) addMessage(cid, "admin", null, auto);
     if (message) addMessage(cid, "customer", req.uid, message);
     return cid;
   })();
-  notifyAdmins("New chat", req.session.user.username + " needs help: " + CHAT_TOPICS[topic], "/admin/chats/" + id);
+  if (!AUTO_TOPICS.includes(topic)) {
+    notifyAdmins("New chat", req.session.user.username + " needs help: " + CHAT_TOPICS[topic], "/admin/chats/" + id);
+  }
+  res.json({ id });
   res.json({ id });
 });
 
@@ -893,12 +963,16 @@ app.get("/api/chats/:id/messages", requireCustomer, (req, res) => {
 });
 
 app.post("/api/chats/:id/messages", requireCustomer, (req, res) => {
-  const chat = db.prepare("SELECT id, status FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  const chat = db.prepare("SELECT id, status, topic, admin_id FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
   if (!chat) return res.status(404).json({ error: "Chat not found." });
   if (chat.status !== "open") return res.status(400).json({ error: "This chat has ended." });
   const body = chatText(req.body.body);
   if (!body) return res.status(400).json({ error: "Type a message first." });
+  const first = db.prepare("SELECT COUNT(*) AS n FROM chat_messages WHERE chat_id = ? AND sender = 'customer'").get(chat.id).n === 0;
   addMessage(chat.id, "customer", req.uid, body);
+  if (first && !chat.admin_id && AUTO_TOPICS.includes(chat.topic)) {
+    notifyAdmins("Customer needs an agent", req.session.user.username + " replied in a chat about \"" + CHAT_TOPICS[chat.topic] + "\".", "/admin/chats/" + chat.id);
+  }
   res.json({ ok: true });
 });
 
@@ -981,7 +1055,7 @@ app.put("/api/admin/chats/:id/close", admin, (req, res) => {
 });
 
 app.get(
-  ["/search", "/product/:slug", "/login", "/register",
+  ["/search", "/product/:slug", "/login", "/register", "/forgot-password",
    "/account", "/account/:section", "/purchases", "/purchases/:section"],
   (req, res) => res.sendFile(path.join(__dirname, "public", "index.html"))
 );
@@ -1046,7 +1120,7 @@ app.put("/api/notifications/:id/read", requireLogin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- WAREHOUSE + LOGS + QR LABELS ----------
+// ---------- WAREHOUSE, LOGS and QR LABELS ----------
 
 // What each scan mode is allowed to move an order from
 const WH_FLOW = {
@@ -1072,7 +1146,7 @@ function logActivity(userId, role, type, summary, orderId, toStatus, method) {
 
 // Moves an order to `status` for a warehouse user
 function whMove(orderId, status, uid, method) {
-  const o = db.prepare("SELECT id, status, ship_name, return_requested_at FROM orders WHERE id = ?").get(orderId);
+  const o = db.prepare("SELECT id, status, ship_name, return_status, cancel_status FROM orders WHERE id = ?").get(orderId);
   if (!o) return { ok: false, kind: "unknown", message: "Order not found." };
   const order = {
     id: o.id, status: o.status, recipient: o.ship_name,
@@ -1081,15 +1155,20 @@ function whMove(orderId, status, uid, method) {
   if (o.status === "cancelled") {
     return { ok: false, kind: "cancelled", order, message: "Order #" + o.id + " was CANCELLED. Do not pack or ship it." };
   }
+  if (o.cancel_status === "pending") {
+    return { ok: false, kind: "wrong_step", order,
+      message: "Order #" + o.id + ": the customer asked to cancel it. Hold it until an admin decides." };
+  }
   if (o.status === status) {
     const prev = db.prepare(
       "SELECT actor FROM activity_log WHERE order_id = ? AND to_status = ? ORDER BY id DESC LIMIT 1").get(o.id, status);
     return { ok: false, kind: "wrong_step", order,
       message: "Order #" + o.id + " is already marked " + status + (prev ? " (by " + prev.actor + ")" : "") + "." };
   }
-  if (status === "returned" && o.status === "delivered" && !o.return_requested_at) {
-    return { ok: false, kind: "wrong_step", order,
-      message: "Order #" + o.id + " was delivered and the customer hasn't requested a return." };
+  if (status === "returned" && o.status === "delivered" && o.return_status !== "approved") {
+    return { ok: false, kind: "wrong_step", order, message: o.return_status === "pending"
+      ? "Order #" + o.id + ": the return is still waiting for admin approval."
+      : "Order #" + o.id + " was delivered and has no approved return." };
   }
   const from = WH_FLOW[status];
   if (!from.includes(o.status)) {
@@ -1143,7 +1222,7 @@ app.get("/api/warehouse/orders", requireWarehouse, (req, res) => {
   const items = db.prepare("SELECT name, qty FROM order_items WHERE order_id = ?");
   res.json(db.prepare(
     `SELECT id, status, ship_name AS recipient, return_reason, created_at FROM orders
-     WHERE ${returning ? "status = 'delivered' AND return_requested_at IS NOT NULL" : "status = ?"}
+     WHERE ${returning ? "status = 'delivered' AND return_status = 'approved'" : "status = ? AND COALESCE(cancel_status, '') != 'pending'"}
        AND (CAST(id AS TEXT) LIKE ? OR COALESCE(ship_name, '') LIKE ?) ORDER BY id`
   ).all(...(returning ? [] : [status]), q, q).map(o => ({ ...o, items: items.all(o.id) })));
 });
@@ -1195,14 +1274,61 @@ app.get("/api/admin/orders/:id/qr", admin, async (req, res) => {
   res.json({ svg: await QRCode.toString("SD-" + token, { type: "svg", margin: 1, errorCorrectionLevel: "M" }) });
 });
 
-// ---------- delete chats with no activity for 14 days ----------
-const CHAT_KEEP_DAYS = 14;
+function restockOrder(orderId) {
+  const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
+  db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
+    .all(orderId).forEach(i => restock.run(i.qty, i.product_id));
+}
 
-function purgeOldChats() {
+// Admin approves or rejects a customer's cancellation or return request
+app.put("/api/admin/orders/:id/requests/:kind", admin, (req, res) => {
+  const id = Number(req.params.id);
+  const kind = req.params.kind;
+  const decision = req.body.decision;
+  if (!["cancel", "return"].includes(kind) || !["approve", "reject"].includes(decision)) {
+    return res.status(400).json({ error: "Invalid request." });
+  }
+  const approve = decision === "approve";
+  const o = db.prepare("SELECT id, user_id, status, cancel_status, return_status FROM orders WHERE id = ?").get(id);
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  if (o[kind + "_status"] !== "pending") return res.status(409).json({ error: "There's no pending request to decide." });
+  if (kind === "cancel" && approve && !["pending", "in_progress"].includes(o.status)) {
+    return res.status(409).json({ error: "This order is already packed or shipped, so it can't be cancelled. Reject the request instead." });
+  }
   db.transaction(() => {
-    // messages are deleted with their chat (ON DELETE CASCADE)
-    db.prepare("DELETE FROM chats WHERE updated_at < datetime('now', ?)").run("-" + CHAT_KEEP_DAYS + " days");
-    // drop bell notifications that point to a chat that no longer exists
+    db.prepare(`UPDATE orders SET ${kind}_status = ? WHERE id = ?`).run(approve ? "approved" : "rejected", id);
+    if (kind === "cancel" && approve) {
+      db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(id);
+      restockOrder(id);
+    }
+    logActivity(adminIdOf(req), "admin", "order",
+      (kind === "cancel" ? "Cancellation" : "Return") + " request for order #" + id + (approve ? " approved" : " rejected"),
+      id, kind === "cancel" && approve ? "cancelled" : null, "manual");
+  })();
+
+  if (kind === "cancel" && approve) {
+    notifyOrder(id, "cancelled");
+    if (o.status === "in_progress") notifyWarehouse("Order cancelled", "Order #" + id + " was cancelled. Don't pack or ship it.", "/warehouse/orders");
+  } else if (kind === "return" && approve) {
+    notify(o.user_id, "Return approved", "Your return for order #" + id + " was approved. Please send the parcel back to the shop.", "/purchases/returns");
+    notifyWarehouse("Return incoming", "Order #" + id + " is being returned. Scan it as Returned when it arrives.", "/warehouse/orders");
+  } else {
+    notify(o.user_id, "Request declined", "Your " + kind + " request for order #" + id + " was declined.", "/purchases/" + (kind === "cancel" ? "status" : "history"));
+  }
+  res.json({ ok: true });
+});
+
+const SHOP_TZ = "Asia/Manila";
+const TZ_OFFSET = "+8 hours";   // Manila UTC+8
+const CHAT_KEEP_DAYS = 14;
+const ORDER_STALE_DAYS = 7;
+
+const today = () => process.env.DEMO_DATE || new Date().toLocaleDateString("en-CA", { timeZone: SHOP_TZ });
+
+// Chats whose last activity is 14 or more days
+function purgeOldChats(day) {
+  db.transaction(() => {
+    db.prepare("DELETE FROM chats WHERE date(updated_at, ?) <= date(?, ?)").run(TZ_OFFSET, day, "-" + CHAT_KEEP_DAYS + " days");
     db.prepare(
       `DELETE FROM notifications
        WHERE (link LIKE 'chat:%' AND CAST(substr(link, 6) AS INTEGER) NOT IN (SELECT id FROM chats))
@@ -1211,8 +1337,43 @@ function purgeOldChats() {
   })();
 }
 
-purgeOldChats();                                // once when the server starts
-setInterval(purgeOldChats, 60 * 60 * 1000);     // then every hour
+// Approved or packed orders with no warehouse activity for 7 days
+function cancelStaleOrders(day) {
+  const stale = db.prepare(
+    `SELECT o.id, o.user_id FROM orders o
+     WHERE o.status IN ('in_progress', 'packed')
+       AND date(COALESCE((SELECT MAX(created_at) FROM activity_log WHERE order_id = o.id), o.created_at), ?) <= date(?, ?)`
+  ).all(TZ_OFFSET, day, "-" + ORDER_STALE_DAYS + " days");
+
+  stale.forEach(o => {
+    const summary = "Order #" + o.id + " auto-cancelled: no warehouse activity for " + ORDER_STALE_DAYS + " days";
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE orders SET status = 'cancelled',
+           cancel_status = CASE WHEN cancel_status = 'pending' THEN 'approved' ELSE cancel_status END WHERE id = ?`
+      ).run(o.id);
+      restockOrder(o.id);
+      db.prepare(
+        `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary)
+         VALUES (NULL, 'System', 'system', 'order', ?, 'cancelled', 'auto', ?)`
+      ).run(o.id, summary);
+    })();
+    notify(o.user_id, "Order cancelled", "Order #" + o.id + " was automatically cancelled because it wasn't processed within " + ORDER_STALE_DAYS + " days.", "/purchases/returns");
+    notifyAdmins("Order auto-cancelled", summary + ".", "/admin/orders/" + o.id);
+  });
+}
+
+function runDailyJobs() {
+  const day = today();
+  const last = db.prepare("SELECT value FROM app_state WHERE key = 'last_cleanup'").get();
+  if (last && last.value === day) return;
+  purgeOldChats(day);
+  cancelStaleOrders(day);
+  db.prepare("INSERT INTO app_state (key, value) VALUES ('last_cleanup', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(day);
+  console.log("Daily clean-up done for " + day);
+}
+runDailyJobs();
+setInterval(runDailyJobs, 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Running at http://localhost:" + PORT));

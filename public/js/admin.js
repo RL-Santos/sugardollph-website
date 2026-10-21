@@ -123,6 +123,7 @@ async function viewOverview(box) {
   box.append(
     h("div", { class: "page-head" }, h("h1", {}, "Overview")),
     h("div", { class: "stats" },
+      stat("Requests to review", d.requests, "/admin/orders?status=requests"),
       stat("Pending approval", c.pending || 0, "/admin/orders?status=pending"),
       stat("In progress", c.in_progress || 0, "/admin/orders?status=in_progress"),
       stat("Cancelled", c.cancelled || 0, "/admin/orders?status=cancelled"),
@@ -242,23 +243,49 @@ const cancelBtn = (o, done) => h("button", {
   }
 }, "Cancel order");
 
+// Approve / Reject buttons for a customer's cancel or return request
+function requestButtons(o, done) {
+  return ["cancel", "return"].filter(k => o[k + "_status"] === "pending").flatMap(k => {
+    const word = k === "cancel" ? "cancellation" : "return";
+    const decide = (decision, text, cls) => h("button", {
+      class: cls,
+      onclick: async () => {
+        if (!(await confirmAction(`${text} the ${word} request for order #${o.id}?`, text))) return;
+        if (await api("PUT", `/api/admin/orders/${o.id}/requests/${k}`, { decision })) {
+          toast("Request " + (decision === "approve" ? "approved" : "rejected") + ".", "success");
+          done();
+        }
+      }
+    }, text + " " + word);
+    return [decide("approve", "Approve", "primary-btn"), decide("reject", "Reject", "secondary-btn")];
+  });
+}
+
+const requestNote = o => ["cancel", "return"].filter(k => o[k + "_status"] === "pending")
+  .map(k => h("small", { class: "req-note" },
+    (k === "cancel" ? "Cancellation" : "Return") + " requested: " + (o[k + "_reason"] || "no reason given")));
+
 // A clickable order card. Pass `reload` to show the Approve / Cancel buttons.
 function orderCard(o, reload) {
   const actions = [];
   if (reload && o.status === "pending") actions.push(approveBtn(o, reload));
   if (reload && ACTIVE.includes(o.status)) actions.push(cancelBtn(o, reload));
+  if (reload) actions.push(...requestButtons(o, reload));
   return h("div", { class: "row-card clickable", onclick: () => navigate("/admin/orders/" + o.id) },
     h("div", { class: "row-info" },
       h("b", {}, "Order #" + o.id, " ", badge(o.status)),
       h("small", {}, (o.username || o.ship_name || "Deleted account") + " \u00b7 " + when(o.created_at)),
-      h("small", {}, o.items.map(i => i.name + " \u00d7" + i.qty).join(", "))),
+      h("small", {}, o.items.map(i => i.name + " \u00d7" + i.qty).join(", ")),
+      requestNote(o)),
     h("div", { class: "row-actions", onclick: e => e.stopPropagation() }, h("b", {}, money(o.total)), actions));
 }
 
 function viewOrders(box) {
   const search = h("input", { type: "search", placeholder: "Search by order #, username or recipient" });
+  const initial = new URLSearchParams(location.search).get("status");
   const status = h("select", {}, h("option", { value: "" }, "All statuses"),
-    STATUSES.map(s => h("option", { value: s, selected: s === new URLSearchParams(location.search).get("status") }, label(s))));
+    h("option", { value: "requests", selected: initial === "requests" }, "Needs review (cancel / return)"),
+    STATUSES.map(s => h("option", { value: s, selected: s === initial }, label(s))));
   const list = h("div", { class: "list" });
 
   async function load() {
@@ -285,7 +312,8 @@ async function viewOrder(box, id) {
       ["Address", o.ship_address || "\u2014"],
       ["Payment", o.payment_method === "COD" ? "Cash on delivery (COD)" : o.payment_method || "\u2014"],
       ["Placed", when(o.created_at)],
-      ...(o.return_requested_at ? [["Return requested", when(o.return_requested_at) + " \u2014 " + o.return_reason]] : [])
+      ...(o.cancel_status ? [["Cancellation request", label(o.cancel_status) + (o.cancel_reason ? " \u2014 " + o.cancel_reason : "")]] : []),
+      ...(o.return_requested_at ? [["Return request", label(o.return_status || "pending") + " \u2014 " + o.return_reason]] : [])
     ];
     box.replaceChildren(
       backLink("/admin/orders", "Back to orders"),
@@ -293,7 +321,8 @@ async function viewOrder(box, id) {
         h("h1", {}, "Order #" + o.id), badge(o.status),
         o.status !== "cancelled" ? h("button", { class: "secondary-btn", onclick: () => printLabel(o) }, "Print QR label") : "",
         o.status === "pending" ? approveBtn(o, render) : "",
-        ACTIVE.includes(o.status) ? cancelBtn(o, render) : ""),
+        ACTIVE.includes(o.status) ? cancelBtn(o, render) : "",
+        requestButtons(o, render)),
       h("div", { class: "panel" }, h("dl", { class: "info-grid" },
         info.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))),
       h("h2", {}, "Items"),

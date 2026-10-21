@@ -47,7 +47,7 @@ function goToRolePage() {
 function applyUser(user) {
   currentUser = user;
   chatUserChanged(); 
-  notifUserChanged(!!user && user.role === "customer"); 
+  notifUserChanged(!!user);
   document.getElementById("guest-bar").hidden = !!user;
   document.getElementById("user-bar").hidden = !user;
   document.getElementById("cart-btn").hidden = !user;
@@ -78,7 +78,7 @@ function applyUser(user) {
 
 // Sends a guest to the login page and remembers where they were
 function goLogin() {
-  if (location.pathname !== "/login" && location.pathname !== "/register") {
+  if (location.pathname !== "/login" && location.pathname !== "/register" && location.pathname !== "/forgot-password") {
     returnTo = location.pathname + location.search;
   }
   navigate("/login");
@@ -174,7 +174,7 @@ function navigate(url) {
 // Looks at the current link and shows the matching page
 function route() {
   const path = location.pathname;
-  const onAuthPage = path === "/login" || path === "/register";
+  const onAuthPage = path === "/login" || path === "/register" || path === "/forgot-password";
 
   // Logged-in people have no reason to see the login page
   if (onAuthPage && currentUser) {
@@ -186,10 +186,12 @@ function route() {
 
   document.getElementById("login-page").hidden = path !== "/login";
   document.getElementById("register-page").hidden = path !== "/register";
+  document.getElementById("forgot-page").hidden = path !== "/forgot-password";
   document.getElementById("app-page").hidden = onAuthPage;
   if (onAuthPage) {
     document.getElementById("error").textContent = "";
     document.getElementById("register-error").textContent = "";
+    document.getElementById("forgot-error").textContent = "";
     return;
   }
 
@@ -487,6 +489,32 @@ async function doRegister() {
   finishAuth(data);
 }
 
+async function doForgot() {
+  const error = document.getElementById("forgot-error");
+  const password = document.getElementById("fg-password").value;
+  const problem = checkPassword(password);
+  if (problem) { error.textContent = problem; return; }
+  if (password !== document.getElementById("fg-confirm").value) { error.textContent = "Passwords don't match."; return; }
+
+  const res = await fetch("/api/forgot-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: document.getElementById("fg-username").value,
+      email: document.getElementById("fg-email").value,
+      phone: document.getElementById("fg-phone").value,
+      new_password: password
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { error.textContent = data.error || "Something went wrong."; return; }
+
+  error.textContent = "";
+  ["fg-username", "fg-email", "fg-phone", "fg-password", "fg-confirm"].forEach(id => document.getElementById(id).value = "");
+  showToast("Password reset. You can log in now.", "success");
+  navigate("/login");
+}
+
 // ---------- BUTTONS ----------
 
 document.getElementById("login-btn").addEventListener("click", doLogin);
@@ -496,6 +524,9 @@ document.getElementById("show-register-btn").addEventListener("click", () => nav
 document.getElementById("back-to-login-btn").addEventListener("click", () => navigate("/login"));
 document.getElementById("open-login-btn").addEventListener("click", goLogin);
 document.getElementById("register-btn").addEventListener("click", doRegister);
+document.getElementById("forgot-link-btn").addEventListener("click", () => navigate("/forgot-password"));
+document.getElementById("forgot-btn").addEventListener("click", doForgot);
+document.getElementById("forgot-back-btn").addEventListener("click", () => navigate("/login"));
 document.getElementById("back-btn").addEventListener("click", closeProduct);
 document.getElementById("prev-btn").addEventListener("click", () => changeImage(-1));
 document.getElementById("next-btn").addEventListener("click", () => changeImage(1));
@@ -533,15 +564,7 @@ cartOverlay.addEventListener("click", e => {
   if (e.target === cartOverlay) cartOverlay.hidden = true;
 });
 
-document.getElementById("checkout-btn").addEventListener("click", async () => {
-  if (!(await confirmAction("Place this order? Payment is cash on delivery (COD).", "Place order"))) return;
-  const data = await send("POST", "/api/checkout", {});
-  if (!data) return;
-  cartOverlay.hidden = true;
-  await loadCart();
-  showToast("Order placed. Waiting for approval.", "success");
-  navigate("/purchases/status");
-});
+document.getElementById("checkout-btn").addEventListener("click", () => openCheckout());
 
 // Pressing Enter in the password box also logs in
 document.getElementById("password").addEventListener("keydown", e => {
@@ -798,6 +821,37 @@ const STATUS_TEXT = {
   returned: "Returned"
 };
 
+// Swaps `btn` for a reason box and a send button
+function askReason(card, btn, placeholder, sendLabel, onSend) {
+  btn.remove();
+  const reason = document.createElement("textarea");
+  reason.className = "chat-text";
+  reason.maxLength = 200;
+  reason.placeholder = placeholder;
+  const actions = document.createElement("div");
+  actions.className = "address-actions";
+  actions.append(makeButton(sendLabel, () => onSend(reason.value)), makeButton("Back", route, "secondary-btn"));
+  card.append(reason, actions);
+}
+
+// Badge + status line, including cancel / return request states
+function orderState(o) {
+  let badge = o.status.replace("_", " ");
+  let text = STATUS_TEXT[o.status] || o.status;
+  if (o.cancel_status === "pending") {
+    badge = "cancellation pending";
+    text = "Cancellation requested. Waiting for the shop to approve it.";
+  } else if (o.cancel_status === "rejected" && o.status !== "cancelled") {
+    text += ". Your cancellation request was declined.";
+  }
+  if (o.status === "delivered") {
+    if (o.return_status === "pending") { badge = "return pending"; text = "Return requested. Waiting for the shop to approve it."; }
+    else if (o.return_status === "approved") { badge = "return approved"; text = "Return approved. Please send the parcel back to the shop."; }
+    else if (o.return_status === "rejected") text = "Delivered. Your return request was declined.";
+  }
+  return { badge, text };
+}
+
 function renderOrderList(box, title, orders, emptyText) {
   box.appendChild(makeHeading(title));
   if (orders.length === 0) {
@@ -807,7 +861,7 @@ function renderOrderList(box, title, orders, emptyText) {
     return;
   }
   orders.forEach(o => {
-    const returning = o.status === "delivered" && !!o.return_requested_at;
+    const state = orderState(o);
     const card = document.createElement("div");
     card.className = "order-card";
 
@@ -817,14 +871,11 @@ function renderOrderList(box, title, orders, emptyText) {
     idText.textContent = "Order #" + o.id;
     const badge = document.createElement("span");
     badge.className = "badge";
-    badge.textContent = returning ? "return requested" : o.status.replace("_", " ");
+    badge.textContent = state.badge;
     head.append(idText, badge);
 
     const statusLine = document.createElement("small");
-    statusLine.textContent = returning
-      ? "Return requested. Waiting for the parcel to reach the shop."
-      : (STATUS_TEXT[o.status] || o.status);
-
+    statusLine.textContent = state.text;
     const date = document.createElement("small");
     date.textContent = new Date(o.created_at.replace(" ", "T") + "Z").toLocaleDateString();
 
@@ -838,20 +889,21 @@ function renderOrderList(box, title, orders, emptyText) {
     total.textContent = "Total: PHP " + o.total.toFixed(2);
     card.appendChild(total);
 
-    if (returning) {
+    if (o.status === "delivered" && o.return_reason) {
       const why = document.createElement("small");
-      why.textContent = "Reason: " + o.return_reason;
+      why.textContent = "Return reason: " + o.return_reason;
       card.appendChild(why);
     }
 
-    if (o.status === "pending" || o.status === "in_progress") {
-      card.appendChild(makeButton("Cancel order", async () => {
-        if (!(await confirmAction("Cancel order #" + o.id + "?", "Cancel order", "Keep order"))) return;
-        if (await send("PUT", "/api/orders/" + o.id + "/cancel", {})) {
-          showToast("Order cancelled.", "success");
-          route(); // reloads the page; the order now shows under Cancelled & returns
-        }
-      }, "danger-btn"));
+    if (o.can_cancel) {
+      const btn = makeButton("Request cancellation", () =>
+        askReason(card, btn, "Why do you want to cancel? (optional)", "Send request", async reason => {
+          if (await send("PUT", "/api/orders/" + o.id + "/cancel", { reason })) {
+            showToast("Cancellation requested. We'll notify you once it's reviewed.", "success");
+            route();
+          }
+        }), "danger-btn");
+      card.appendChild(btn);
     }
 
     if (o.status === "shipped") {
@@ -865,39 +917,27 @@ function renderOrderList(box, title, orders, emptyText) {
     }
 
     if (o.can_return) {
-      const returnBtn = makeButton("Return this order", () => {
-        returnBtn.remove();
-        const reason = document.createElement("textarea");
-        reason.className = "chat-text";
-        reason.maxLength = 200;
-        reason.placeholder = "Why are you returning it?";
-        const actions = document.createElement("div");
-        actions.className = "address-actions";
-        actions.append(
-          makeButton("Send return request", async () => {
-            if (await send("PUT", "/api/orders/" + o.id + "/return", { reason: reason.value })) {
-              showToast("Return requested. Please send the parcel back to the shop.", "success");
-              navigate("/purchases/returns");
-            }
-          }),
-          makeButton("Cancel", route, "secondary-btn")
-        );
-        card.append(reason, actions);
-      }, "secondary-btn");
-      card.appendChild(returnBtn);
+      const btn = makeButton("Return this order", () =>
+        askReason(card, btn, "Why are you returning it?", "Send return request", async reason => {
+          if (await send("PUT", "/api/orders/" + o.id + "/return", { reason })) {
+            showToast("Return requested. We'll notify you once it's reviewed.", "success");
+            navigate("/purchases/returns");
+          }
+        }), "secondary-btn");
+      card.appendChild(btn);
     }
     box.appendChild(card);
   });
 }
 
 async function renderHistory(box) {
-  const orders = (await loadOrders()).filter(o => o.status === "delivered" && !o.return_requested_at);
+  const orders = (await loadOrders()).filter(o => o.status === "delivered");
   renderOrderList(box, "Order history", orders, "No completed orders yet.");
 }
 
 async function renderReturns(box) {
-  const orders = (await loadOrders()).filter(o =>
-    ["cancelled", "returned"].includes(o.status) || (o.status === "delivered" && o.return_requested_at));
+  const orders = (await loadOrders()).filter(o => ["cancelled", "returned"].includes(o.status) ||
+    (o.status === "delivered" && ["pending", "approved"].includes(o.return_status)));
   renderOrderList(box, "Cancelled & returns", orders, "No cancelled or returned orders.");
 }
 

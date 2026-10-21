@@ -149,6 +149,15 @@ if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")
   db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
 }
 
+// cancel / return requests that need admin approval
+const ordCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
+for (const col of ["cancel_status", "cancel_requested_at", "cancel_reason", "return_status"]) {
+  if (!ordCols.includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} TEXT`);
+}
+db.exec("UPDATE orders SET return_status = 'pending' WHERE return_requested_at IS NOT NULL AND return_status IS NULL AND status = 'delivered'");
+
+db.exec("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+
 const orderCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
 if (!orderCols.includes("return_requested_at")) db.exec("ALTER TABLE orders ADD COLUMN return_requested_at TEXT");
 if (!orderCols.includes("return_reason")) db.exec("ALTER TABLE orders ADD COLUMN return_reason TEXT");
