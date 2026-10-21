@@ -21,6 +21,7 @@
       <label class="field">Password
         <input type="password" id="password" placeholder="Enter your password">
       </label>
+      <p><button id="forgot-link-btn" class="link-btn">Forgot password?</button></p>
       <button id="login-btn" class="primary-btn">Log in</button>
       <p id="error" class="form-error"></p>
       <p>No account yet? <button id="show-register-btn" class="link-btn">Create an account</button></p>
@@ -95,6 +96,41 @@
   <div class="split-right"></div>
 </div>
 
+<!-- FORGOT PASSWORD -->
+<div id="forgot-page" class="split" hidden>
+  <div class="split-left">
+    <div class="auth-box">
+      <img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+      <h2>Reset your password</h2>
+      <p class="hint">Enter your username and the email and mobile number saved on your account.</p>
+      <label class="field">Username
+        <input type="text" id="fg-username">
+      </label>
+      <label class="field">Email
+        <input type="email" id="fg-email">
+      </label>
+      <label class="field">Mobile number
+        <input type="tel" id="fg-phone" placeholder="09XXXXXXXXX">
+      </label>
+      <hr class="form-divider">
+      <label class="field">New password
+        <input type="password" id="fg-password">
+      </label>
+      <label class="field">Confirm new password
+        <input type="password" id="fg-confirm">
+      </label>
+      <ul class="hint">
+        <li>Password: 8 to 72 characters</li>
+        <li>At least 1 uppercase letter, 1 lowercase letter, 1 number and 1 symbol</li>
+      </ul>
+      <button id="forgot-btn" class="primary-btn">Reset password</button>
+      <p id="forgot-error" class="form-error"></p>
+      <p><button id="forgot-back-btn" class="link-btn">Back to log in</button></p>
+    </div>
+  </div>
+  <div class="split-right"></div>
+</div>
+
 <!-- LOGGED-IN AREA -->
 <div id="app-page" hidden>
   <div class="userbar">
@@ -123,7 +159,7 @@
       <option value="others">Others</option>
     </select>
     <div id="bell-wrap" class="bell-wrap" hidden>
-      <button id="bell-btn" class="bell-btn" aria-label="Notifications">&#128276;<span id="bell-count" hidden></span></button>
+      <button id="bell-btn" class="bell-btn" aria-label="Notifications"><span class="bell-icon"></span><span id="bell-count" hidden></span></button>
       <div id="notif-panel" hidden></div>
     </div>
     <button id="cart-btn" class="cart-btn">Cart (<span id="cart-count">0</span>)</button>
@@ -199,6 +235,11 @@
     </div>
   </div>
 
+  <!-- CHECKOUT -->
+  <div id="checkout-overlay" hidden>
+    <div id="checkout-box"></div>
+  </div>
+
   <!-- REMOVE CONFIRMATION -->
   <div id="confirm-overlay" hidden>
     <div id="confirm-box">
@@ -209,8 +250,10 @@
   </div>
 </div>
 
+<script src="/js/password-eye.js"></script>
 <script src="/js/app.js"></script>
 <script src="/js/chat.js"></script>
+<script src="/js/checkout.js"></script>
 <script src="/js/notifications.js"></script>
 
 </body>

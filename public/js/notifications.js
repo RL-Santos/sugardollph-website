@@ -18,8 +18,16 @@ function notifAgo(s) {
 }
 
 function notifOpen(link) {
-  if (link.startsWith("chat:")) openChatById(Number(link.slice(5)));
-  else navigate(link);
+  if (link.startsWith("chat:")) {
+    if (typeof openChatById === "function") return openChatById(Number(link.slice(5)));
+    location.href = "/"; // staff pages have no customer chat box
+    return;
+  }
+  const here = !document.body.classList.contains("admin") ? "shop"
+    : location.pathname.startsWith("/warehouse") ? "warehouse" : "admin";
+  const there = link.startsWith("/admin") ? "admin" : link.startsWith("/warehouse") ? "warehouse" : "shop";
+  if (here === there) navigate(link);
+  else location.href = link;
 }
 
 function notifPut(url) {
