@@ -269,6 +269,11 @@ app.get("/api/admin/overview", admin, (req, res) => {
       `SELECT o.id, o.status, o.total, COALESCE(u.username, o.ship_name, 'Deleted account') AS customer
        FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 5`).all(),
     requests: db.prepare("SELECT COUNT(*) AS n FROM orders WHERE cancel_status = 'pending' OR return_status = 'pending'").get().n,
+    daily: db.prepare(
+      `SELECT date(created_at, '+8 hours') AS day, COUNT(*) AS orders,
+         COALESCE(SUM(CASE WHEN status IN (${REVENUE_ORDER.map(s => `'${s}'`).join(",")}) THEN total END), 0) AS revenue
+       FROM orders WHERE date(created_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
+       GROUP BY day`).all(),
   });
 });
 
@@ -299,13 +304,15 @@ app.get("/api/admin/users/:id", admin, (req, res) => {
 app.put("/api/admin/users/:id/role", admin, (req, res) => {
   const id = Number(req.params.id);
   const role = String(req.body.role || "");
-  const target = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id);
+  const target = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(id);
   if (!ROLES.includes(role)) return res.status(400).json({ error: "Unknown role." });
   if (!target) return res.status(404).json({ error: "User not found." });
   if (target.username === req.session.user.username) {
     return res.status(400).json({ error: "You can't change your own role." });
   }
   db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+  logActivity(adminIdOf(req), "admin", "user",
+    "Role of " + target.username + " changed: " + target.role + " \u2192 " + role, null, null, "manual");
   res.json({ ok: true });
 });
 
@@ -316,7 +323,10 @@ app.put("/api/admin/users/:id/active", admin, (req, res) => {
   if (target.username === req.session.user.username) {
     return res.status(400).json({ error: "You can't deactivate your own account." });
   }
-  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(req.body.active ? 1 : 0, id);
+  const on = req.body.active ? 1 : 0;
+  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(on, id);
+  logActivity(adminIdOf(req), "admin", "user",
+    "Account " + target.username + (on ? " activated" : " deactivated"), null, null, "manual");
   res.json({ ok: true });
 });
 
@@ -351,29 +361,37 @@ app.post("/api/admin/products", admin, (req, res) => {
   const info = db.prepare(
     "INSERT INTO products (name, description, price, amount, category) VALUES (?, ?, ?, ?, ?)"
   ).run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category);
+  logActivity(adminIdOf(req), "admin", "product",
+    "Added product " + r.p.name + " (PHP " + r.p.price + ", stock " + r.p.amount + ")", null, null, "manual");
   res.json({ id: Number(info.lastInsertRowid) });
 });
 
 app.put("/api/admin/products/:id", admin, (req, res) => {
   const id = Number(req.params.id);
-  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) {
-    return res.status(404).json({ error: "Product not found." });
-  }
+  const old = db.prepare("SELECT * FROM products WHERE id = ?").get(id);
+  if (!old) return res.status(404).json({ error: "Product not found." });
   const r = checkProduct(req.body, id);
   if (r.error) return res.status(400).json({ error: r.error });
   db.prepare("UPDATE products SET name = ?, description = ?, price = ?, amount = ?, category = ? WHERE id = ?")
     .run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category, id);
+  const changes = ["name", "description", "price", "amount", "category"]
+    .filter(k => String(old[k]) !== String(r.p[k]))
+    .map(k => k === "description" ? "description" : k + ": " + old[k] + " \u2192 " + r.p[k]);
+  if (changes.length) {
+    logActivity(adminIdOf(req), "admin", "product",
+      "Edited product " + old.name + " (" + changes.join(", ") + ")", null, null, "manual");
+  }
   res.json({ id });
 });
 
 app.delete("/api/admin/products/:id", admin, (req, res) => {
   const id = Number(req.params.id);
-  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) {
-    return res.status(404).json({ error: "Product not found." });
-  }
+  const old = db.prepare("SELECT name FROM products WHERE id = ?").get(id);
+  if (!old) return res.status(404).json({ error: "Product not found." });
   const pics = db.prepare("SELECT path FROM product_images WHERE product_id = ?").all(id);
-  db.prepare("DELETE FROM products WHERE id = ?").run(id); // pictures and cart rows cascade; old orders keep the name
+  db.prepare("DELETE FROM products WHERE id = ?").run(id);
   pics.forEach(i => fs.unlink(path.join(__dirname, "public", i.path), () => {}));
+  logActivity(adminIdOf(req), "admin", "product", "Deleted product " + old.name, null, null, "manual");
   res.json({ ok: true });
 });
 
@@ -381,12 +399,14 @@ app.post("/api/admin/products/:id/images", admin, (req, res) => {
   upload.array("images", 10)(req, res, err => {
     const files = req.files || [];
     const drop = () => files.forEach(f => fs.unlink(f.path, () => {}));
-    const product = db.prepare("SELECT id FROM products WHERE id = ?").get(Number(req.params.id));
+    const product = db.prepare("SELECT id, name FROM products WHERE id = ?").get(Number(req.params.id));
     if (err) { drop(); return res.status(400).json({ error: "Each picture must be 5 MB or less, max 10 at a time." }); }
     if (!product) { drop(); return res.status(404).json({ error: "Product not found." }); }
     if (files.length === 0) return res.status(400).json({ error: "No valid pictures chosen (JPG, PNG or WEBP only)." });
     const add = db.prepare("INSERT INTO product_images (product_id, path) VALUES (?, ?)");
     files.forEach(f => add.run(product.id, "/images/" + f.filename));
+    logActivity(adminIdOf(req), "admin", "product",
+      "Added " + files.length + " picture(s) to " + product.name, null, null, "manual");
     res.json({ added: files.length });
   });
 });
@@ -397,6 +417,8 @@ app.delete("/api/admin/products/:id/images/:imageId", admin, (req, res) => {
   if (!img) return res.status(404).json({ error: "Picture not found." });
   db.prepare("DELETE FROM product_images WHERE id = ?").run(img.id);
   fs.unlink(path.join(__dirname, "public", img.path), () => {});
+  const prod = db.prepare("SELECT name FROM products WHERE id = ?").get(Number(req.params.id));
+  logActivity(adminIdOf(req), "admin", "product", "Removed a picture from " + (prod ? prod.name : "a product"), null, null, "manual");
   res.json({ ok: true });
 });
 
@@ -1252,7 +1274,7 @@ app.get("/api/warehouse/activity", requireWarehouse, (req, res) => {
 
 // ----- admin logs + QR label -----
 app.get("/api/admin/logs", admin, (req, res) => {
-  const type = ["order", "stock"].includes(req.query.type) ? req.query.type : "";
+  const type = ["order", "stock", "user", "product"].includes(req.query.type) ? req.query.type : "";
   const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
   res.json(db.prepare(
     `SELECT id, actor, role, type, order_id, method, summary, created_at FROM activity_log

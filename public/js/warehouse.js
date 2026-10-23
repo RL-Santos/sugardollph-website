@@ -18,6 +18,17 @@ const label = s => { const t = String(s).replace("_", " "); return t[0].toUpperC
 const badge = status => h("span", { class: "badge " + status }, label(status));
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
+function table(cols, rows, empty) {
+  if (!rows.length) return h("p", { class: "empty" }, empty);
+  return h("div", { class: "table-wrap" },
+    h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, cols.map(c => h("th", {}, c)))),
+      h("tbody", {}, rows)));
+}
+const tr = (...cells) => h("tr", {},
+  cells.map(c => c instanceof Node && c.tagName === "TD" ? c : h("td", {}, c)));
+const actionsCell = kids => h("td", { class: "actions" }, kids);
+
 function toast(text, type) {
   const t = h("div", { class: "toast " + (type || "") }, text);
   document.body.appendChild(t);
@@ -180,13 +191,18 @@ const NEXT = {
 function viewOrders(box) {
   const search = h("input", { type: "search", placeholder: "Search by order # or recipient" });
   const tab = h("select", {}, TABS.map(([v, t]) => h("option", { value: v }, t)));
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     const t = tab.value;
+    const returning = t === "returning";
     const q = new URLSearchParams({ status: t, search: search.value.trim() });
     const rows = await api("GET", "/api/warehouse/orders?" + q);
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(o => card(o, t)) : ["Nothing here."]));
+    if (!rows) return;
+    const cols = ["Order", "Recipient", "Items", "Status"];
+    if (returning) cols.push("Reason");
+    cols.push("Action");
+    list.replaceChildren(table(cols, rows.map(o => orderRow(o, t, returning)), "Nothing here."));
   }
 
   async function move(o, status) {
@@ -197,15 +213,18 @@ function viewOrders(box) {
     load();
   }
 
-  function card(o, t) {
+  function orderRow(o, t, returning) {
     const [next, text] = NEXT[t];
-    return h("div", { class: "row-card" },
-      h("div", { class: "row-info" },
-        h("b", {}, "Order #" + o.id, " ", t === "returning" ? h("span", { class: "badge pending" }, "Return requested") : badge(o.status)),
-        h("small", {}, "For: " + (o.recipient || "\u2014")),
-        h("small", {}, o.items.map(i => i.qty + " \u00d7 " + i.name).join(", ")),
-        o.return_reason ? h("small", {}, "Reason: " + o.return_reason) : ""),
-      h("div", { class: "row-actions" }, h("button", { class: "primary-btn", onclick: () => move(o, next) }, text)));
+    const cells = [
+      h("b", {}, "#" + o.id),
+      o.recipient || "\u2014",
+      o.items.map(i => i.qty + " \u00d7 " + i.name).join(", "),
+      h("td", { class: "status-col" },
+        returning ? h("span", { class: "badge pending" }, "Return requested") : badge(o.status))
+    ];
+    if (returning) cells.push(h("td", { class: "reason-col" }, o.return_reason || "No reason given"));
+    cells.push(actionsCell(h("button", { class: "primary-btn", onclick: () => move(o, next) }, text)));
+    return tr(...cells);
   }
 
   search.addEventListener("input", debounce(load));
@@ -220,17 +239,18 @@ function viewOrders(box) {
 function viewStock(box) {
   const search = h("input", { type: "search", placeholder: "Search products" });
   const filter = h("select", {}, h("option", { value: "" }, "All products"), h("option", { value: "low" }, "Low stock (5 or fewer)"));
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     let rows = await api("GET", "/api/products?search=" + encodeURIComponent(search.value.trim()));
     if (!rows) return;
     if (filter.value === "low") rows = rows.filter(p => p.amount <= 5);
-    list.replaceChildren(...(rows.length ? rows.map(row) : ["No products found."]));
+    list.replaceChildren(table(["", "Product", "Stock", "Qty", "Note", "Actions"],
+      rows.map(row), "No products found."));
   }
 
   function row(p) {
-    const qty = h("input", { type: "number", min: "0", step: "1", placeholder: "Qty", class: "qty-input" });
+    const qty = h("input", { type: "number", min: "0", step: "1", placeholder: "Qty" });
     const note = h("input", { type: "text", maxlength: "60", placeholder: "Note (optional)" });
     const apply = async mode => {
       const n = Number(qty.value);
@@ -241,14 +261,14 @@ function viewStock(box) {
         load();
       }
     };
-    return h("div", { class: "row-card" },
-      h("div", { class: "row-main" },
-        p.image ? h("img", { class: "thumb", src: p.image, alt: "" }) : h("div", { class: "thumb" }),
-        h("div", { class: "row-info" }, h("b", {}, p.name),
-          h("small", {}, "Stock: " + p.amount + (p.amount <= 5 ? " \u00b7 LOW" : "")))),
-      h("div", { class: "row-actions" }, qty, note,
+    return tr(
+      p.image ? h("img", { class: "thumb", src: p.image, alt: "" }) : h("div", { class: "thumb" }),
+      h("b", {}, p.name),
+      p.amount + (p.amount <= 5 ? " \u00b7 LOW" : ""),
+      qty, note,
+      actionsCell([
         h("button", { class: "primary-btn", onclick: () => apply("add") }, "Add stock"),
-        h("button", { class: "secondary-btn", onclick: () => apply("set") }, "Set count")));
+        h("button", { class: "secondary-btn", onclick: () => apply("set") }, "Set count")]));
   }
 
   search.addEventListener("input", debounce(load));
@@ -265,10 +285,13 @@ async function viewActivity(box) {
   const rows = await api("GET", "/api/warehouse/activity");
   if (!rows) return;
   box.append(h("div", { class: "page-head" }, h("h1", {}, "My activity")),
-    h("div", { class: "list" }, rows.length ? rows.map(l => h("div", { class: "row-card" },
-      h("div", { class: "row-info" },
+    table(["Time", "Activity", "Type", "Method"],
+      rows.map(l => tr(
+        when(l.created_at),
         h("b", {}, l.summary),
-        h("small", {}, when(l.created_at) + (l.method ? " \u00b7 " + l.method : ""))))) : "Nothing yet."));
+        h("span", { class: "badge " + l.type }, label(l.type)),
+        l.method ? label(l.method) : "\u2014")),
+      "Nothing yet."));
 }
 
 // ---------- start ----------

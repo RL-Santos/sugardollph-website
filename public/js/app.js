@@ -85,6 +85,10 @@ function goLogin() {
 }
 
 function finishAuth(user) {
+  if (user.role === "admin" || user.role === "warehouse") {
+    window.location.href = "/" + user.role;
+    return;
+  }
   applyUser(user);
   history.replaceState({ app: true }, "", returnTo);
   returnTo = "/";
@@ -821,20 +825,57 @@ const STATUS_TEXT = {
   returned: "Returned"
 };
 
-// Swaps `btn` for a reason box and a send button
-function askReason(card, btn, placeholder, sendLabel, onSend) {
+const CANCEL_REASONS = [
+  "Ordered by mistake",
+  "Wrong size, color or item",
+  "Want to change the delivery address",
+  "Found a cheaper price elsewhere",
+  "Changed my mind",
+  "Others"
+];
+
+function askReason(card, btn, placeholder, sendLabel, onSend, options) {
   btn.remove();
+  const group = "reason-" + Math.random().toString(36).slice(2);
   const reason = document.createElement("textarea");
   reason.className = "chat-text";
   reason.maxLength = 200;
   reason.placeholder = placeholder;
+  reason.hidden = !!options;
+
+  (options || []).forEach(text => {
+    const pick = document.createElement("input");
+    pick.type = "radio";
+    pick.name = group;
+    pick.value = text;
+    pick.onchange = () => {
+      reason.hidden = text !== "Others";
+      if (!reason.hidden) reason.focus();
+    };
+    const row = document.createElement("label");
+    row.className = "co-option";
+    const name = document.createElement("div");
+    name.className = "co-text";
+    name.textContent = text;
+    row.append(pick, name);
+    card.appendChild(row);
+  });
+
+  const submit = () => {
+    if (!options) return onSend(reason.value);
+    const picked = card.querySelector('input[name="' + group + '"]:checked');
+    if (!picked) return showToast("Please pick a reason.", "error");
+    if (picked.value !== "Others") return onSend(picked.value);
+    if (reason.value.trim().length < 3) return showToast("Please tell us your reason.", "error");
+    onSend(reason.value.trim());
+  };
+
   const actions = document.createElement("div");
   actions.className = "address-actions";
-  actions.append(makeButton(sendLabel, () => onSend(reason.value)), makeButton("Back", route, "secondary-btn"));
+  actions.append(makeButton(sendLabel, submit), makeButton("Back", route, "secondary-btn"));
   card.append(reason, actions);
 }
 
-// Badge + status line, including cancel / return request states
 function orderState(o) {
   let badge = o.status.replace("_", " ");
   let text = STATUS_TEXT[o.status] || o.status;
@@ -897,15 +938,14 @@ function renderOrderList(box, title, orders, emptyText) {
 
     if (o.can_cancel) {
       const btn = makeButton("Request cancellation", () =>
-        askReason(card, btn, "Why do you want to cancel? (optional)", "Send request", async reason => {
+        askReason(card, btn, "Tell us your reason", "Send request", async reason => {
           if (await send("PUT", "/api/orders/" + o.id + "/cancel", { reason })) {
             showToast("Cancellation requested. We'll notify you once it's reviewed.", "success");
             route();
           }
-        }), "danger-btn");
+        }, CANCEL_REASONS), "danger-btn");
       card.appendChild(btn);
     }
-
     if (o.status === "shipped") {
       card.appendChild(makeButton("I received my order", async () => {
         if (!(await confirmAction("Confirm that you received order #" + o.id + "?", "Yes, I got it", "Not yet"))) return;

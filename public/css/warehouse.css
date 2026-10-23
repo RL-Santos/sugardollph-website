@@ -1,0 +1,6 @@
+#reader { width: min(420px, 100%); min-height: 60px; margin: 12px 0; border-radius: 12px; overflow: hidden; background: #000; }
+.mode-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+.mode-btn { padding: 10px 18px; border: 1px solid #3A2D28; border-radius: 999px; background: #fff; color: #3A2D28; font-weight: 600; }
+.mode-btn.active { background: #3A2D28; color: #fff; }
+.scan-result.ok { border-color: #3A2D28; background: #F1E7DD; }
+.scan-result.wrong_step, .scan-result.unknown { border-color: #A57756; background: #EFD7CC; }

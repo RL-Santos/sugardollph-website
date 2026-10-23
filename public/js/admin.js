@@ -26,6 +26,17 @@ const badge = status => h("span", { class: "badge " + status }, label(status));
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const backLink = (href, text) => h("p", {}, h("a", { href, "data-nav": "" }, "\u2190 " + text));
 
+function table(cols, rows, empty) {
+  if (!rows.length) return h("p", { class: "empty" }, empty);
+  return h("div", { class: "table-wrap" },
+    h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, cols.map(c => h("th", {}, c)))),
+      h("tbody", {}, rows)));
+}
+const tr = (onclick, ...cells) => h("tr", onclick ? { class: "clickable", onclick } : {},
+  cells.map(c => c instanceof Node && c.tagName === "TD" ? c : h("td", {}, c)));
+const actionsCell = kids => h("td", { class: "actions", onclick: e => e.stopPropagation() }, kids);
+
 function toast(text, type) {
   const t = h("div", { class: "toast " + (type || "") }, text);
   document.body.appendChild(t);
@@ -111,87 +122,121 @@ function route() {
 
 // ---------- overview ----------
 
+const STATUS_COLOR = { pending: "#CBAD8D", in_progress: "#A57756", paid: "#C9A792", packed: "#A48374",
+  shipped: "#988780", delivered: "#3A2D28", cancelled: "#b00020", returned: "#D1C7BD" };
+
+function barChart(days) {
+  const max = Math.max(1, ...days.map(d => d.revenue));
+  return h("div", { class: "bars" }, days.map(d =>
+    h("div", { class: "bar-col", title: money(d.revenue) + " \u00b7 " + d.orders + " order(s)" },
+      h("small", {}, d.revenue ? Math.round(d.revenue) : ""),
+      h("div", { class: "bar-area" },
+        h("div", { class: "bar", style: `height:${d.revenue ? Math.max(d.revenue / max * 100, 4) : 1}%` })),
+      h("small", {}, d.label))));
+}
+
+function donut(counts) {
+  const entries = Object.entries(counts);
+  const total = entries.reduce((a, [, n]) => a + n, 0);
+  let acc = 0;
+  const stops = entries.map(([s, n]) => {
+    const from = acc / total * 100; acc += n;
+    return `${STATUS_COLOR[s] || "#999"} ${from}% ${acc / total * 100}%`;
+  });
+  return h("div", { class: "donut-wrap" },
+    h("div", { class: "donut", style: `background:${total ? `conic-gradient(${stops.join(",")})` : "#eee"}` },
+      h("div", { class: "donut-hole" }, h("b", {}, total), h("small", {}, "orders"))),
+    h("div", { class: "legend" }, entries.map(([s, n]) =>
+      h("span", {}, h("i", { style: `background:${STATUS_COLOR[s] || "#999"}` }), label(s) + " (" + n + ")"))));
+}
+
+function hbars(rows, name, value, text, cls) {
+  const max = Math.max(1, ...rows.map(value));
+  return rows.map(r => h("div", { class: "hbar" },
+    h("div", { class: "hbar-top" }, h("span", {}, name(r)), h("b", {}, text(r))),
+    h("div", { class: "hbar-track" }, h("span", { class: cls || "", style: `width:${value(r) / max * 100}%` }))));
+}
+
 async function viewOverview(box) {
   const d = await api("GET", "/api/admin/overview");
   if (!d) return;
   const c = d.counts;
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const stat = (name, value, href) =>
-    h(href ? "a" : "div", { class: "stat", href, "data-nav": href ? "" : null }, h("b", {}, value), h("span", {}, name));
-  const lines = (rows, empty, render) => rows.length ? rows.map(render) : [h("p", {}, empty)];
+  const stat = (name, value, href, tone) =>
+    h(href ? "a" : "div", { class: "stat " + (tone || ""), href, "data-nav": href ? "" : null },
+      h("span", {}, name), h("b", {}, value));
+  const empty = text => h("p", { class: "empty" }, text);
+
+  // last 7 days, Manila time
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const day = new Date(Date.now() + 8 * 3600e3 - i * 864e5).toISOString().slice(0, 10);
+    const f = d.daily.find(x => x.day === day) || { orders: 0, revenue: 0 };
+    days.push({ ...f, label: new Date(day + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }) });
+  }
 
   box.append(
-    h("div", { class: "page-head" }, h("h1", {}, "Overview")),
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Dashboard"),
+      h("small", { class: "sub" }, new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })))),
     h("div", { class: "stats" },
-      stat("Requests to review", d.requests, "/admin/orders?status=requests"),
-      stat("Pending approval", c.pending || 0, "/admin/orders?status=pending"),
+      stat("Requests to review", d.requests, "/admin/orders?status=requests", d.requests ? "warn" : ""),
+      stat("Pending approval", c.pending || 0, "/admin/orders?status=pending", c.pending ? "warn" : ""),
       stat("In progress", c.in_progress || 0, "/admin/orders?status=in_progress"),
-      stat("Cancelled", c.cancelled || 0, "/admin/orders?status=cancelled"),
+      stat("Daily revenue", money(days[days.length - 1].revenue), null, "good"),
       stat("Total orders", total, "/admin/orders"),
-      stat("Revenue (approved orders)", money(d.revenue)),
       stat("Customers", d.customers, "/admin/users"),
       stat("Products", d.products, "/admin/products")),
+    h("div", { class: "panels wide" },
+      h("div", { class: "panel span2" }, h("h2", {}, "Revenue \u00b7 last 7 days"), barChart(days)),
+      h("div", { class: "panel" }, h("h2", {}, "Orders by status"), donut(c))),
     h("div", { class: "panels" },
       h("div", { class: "panel" }, h("h2", {}, "Trending products"),
-        ...lines(d.trending, "No sales yet.", t =>
-          h("div", { class: "line" }, h("span", {}, t.name), h("b", {}, t.sold + " sold")))),
+        ...(d.trending.length ? hbars(d.trending, t => t.name, t => t.sold, t => t.sold + " sold") : [empty("No sales yet.")])),
       h("div", { class: "panel" }, h("h2", {}, "Low stock (5 or fewer)"),
-        ...lines(d.lowStock, "Nothing is running low.", p =>
-          h("div", { class: "line" }, h("span", {}, p.name), h("b", {}, p.amount + " left")))),
-      h("div", { class: "panel" }, h("h2", {}, "Recent orders"),
-        ...lines(d.recent, "No orders yet.", o =>
-          h("a", { class: "line", href: "/admin/orders/" + o.id, "data-nav": "" },
-            h("span", {}, "#" + o.id + " " + o.customer), h("span", {}, money(o.total) + " \u00b7 " + label(o.status)))))));
+        ...(d.lowStock.length ? hbars(d.lowStock, p => p.name, p => p.amount, p => p.amount + " left", "warn") : [empty("Nothing is running low.")])),
+      h("div", { class: "panel span-all" }, h("h2", {}, "Recent orders"),
+        table(["Order", "Customer", "Total", "Status"],
+          d.recent.map(o => tr(() => navigate("/admin/orders/" + o.id), h("b", {}, "#" + o.id), o.customer, money(o.total), badge(o.status))),
+          "No orders yet."))));
 }
 
 // ---------- users ----------
 
 function viewUsers(box) {
   const search = h("input", { type: "search", placeholder: "Search by username, name or email" });
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     const rows = await api("GET", "/api/admin/users?search=" + encodeURIComponent(search.value.trim()));
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(userCard) : ["No users found."]));
+    if (rows) list.replaceChildren(table(["Username", "Name", "Email", "Role", "Status", "Orders", "Actions"],
+      rows.map(userRow), "No users found."));
   }
 
-  function userCard(u) {
+  function userRow(u) {
     const name = [u.first_name, u.last_name].filter(Boolean).join(" ");
-    let actions;
-    if (me && u.username === me.username) {
-      actions = [h("small", {}, "(you)")];
-    } else {
+    let actions = [h("small", {}, "(you)")];
+    if (!(me && u.username === me.username)) {
       const roleSel = h("select", {}, ROLES.map(r => h("option", { value: r, selected: r === u.role }, r)));
       actions = [
         roleSel,
-        h("button", {
-          class: "secondary-btn",
-          onclick: async () => {
-            if (await api("PUT", `/api/admin/users/${u.id}/role`, { role: roleSel.value })) {
-              toast(u.username + " is now " + roleSel.value + ".", "success");
-              load();
-            }
+        h("button", { class: "secondary-btn", onclick: async () => {
+          if (await api("PUT", `/api/admin/users/${u.id}/role`, { role: roleSel.value })) {
+            toast(u.username + " is now " + roleSel.value + ".", "success"); load();
           }
-        }, "Change role"),
-        h("button", {
-          class: u.active ? "danger-btn" : "secondary-btn",
-          onclick: async () => {
-            if (u.active && !(await confirmAction(`Deactivate ${u.username}? They won't be able to log in.`, "Deactivate"))) return;
-            if (await api("PUT", `/api/admin/users/${u.id}/active`, { active: !u.active })) {
-              toast(u.username + (u.active ? " was deactivated." : " was activated."), "success");
-              load();
-            }
+        } }, "Change role"),
+        h("button", { class: u.active ? "danger-btn" : "secondary-btn", onclick: async () => {
+          if (u.active && !(await confirmAction(`Deactivate ${u.username}? They won't be able to log in.`, "Deactivate"))) return;
+          if (await api("PUT", `/api/admin/users/${u.id}/active`, { active: !u.active })) {
+            toast(u.username + (u.active ? " was deactivated." : " was activated."), "success"); load();
           }
-        }, u.active ? "Deactivate" : "Activate")
+        } }, u.active ? "Deactivate" : "Activate")
       ];
     }
-    return h("div", { class: "row-card clickable", onclick: () => navigate("/admin/users/" + u.id) },
-      h("div", { class: "row-info" },
-        h("b", {}, u.username, " ", h("span", { class: "badge" }, u.role),
-          u.active ? "" : [" ", h("span", { class: "badge cancelled" }, "deactivated")]),
-        h("small", {}, [name, u.email].filter(Boolean).join(" \u00b7 ") || "No profile info"),
-        h("small", {}, u.orders + " order(s)")),
-      h("div", { class: "row-actions", onclick: e => e.stopPropagation() }, actions));
+    return tr(() => navigate("/admin/users/" + u.id),
+      h("b", {}, u.username), name || "\u2014", u.email || "\u2014",
+      h("span", { class: "badge" }, u.role),
+      h("span", { class: "badge " + (u.active ? "delivered" : "cancelled") }, u.active ? "Active" : "Deactivated"),
+      u.orders, actionsCell(actions));
   }
 
   search.addEventListener("input", debounce(load));
@@ -222,7 +267,7 @@ async function viewUser(box, id) {
         h("small", {}, [a.street, a.barangay, a.city, a.province, a.postal_code].filter(Boolean).join(", ")),
         a.notes ? h("small", {}, "Note: " + a.notes) : ""))) : "No saved addresses."),
     h("h2", {}, "Orders (" + u.orders.length + ")"),
-    h("div", { class: "list" }, u.orders.length ? u.orders.map(o => orderCard(o)) : "No orders yet."));
+    ordersTable(u.orders));
 }
 
 // ---------- orders ----------
@@ -261,23 +306,39 @@ function requestButtons(o, done) {
   });
 }
 
-const requestNote = o => ["cancel", "return"].filter(k => o[k + "_status"] === "pending")
-  .map(k => h("small", { class: "req-note" },
-    (k === "cancel" ? "Cancellation" : "Return") + " requested: " + (o[k + "_reason"] || "no reason given")));
+// Shows the reason when a customer asks to cancel or return an order
+function reasonCell(o) {
+  const row = (kind, status, reason) => h("div", { class: "reason" },
+    h("small", {}, kind + " \u00b7 " + label(status)),
+    h("span", {}, reason || "No reason given"));
+  const parts = [];
+  if (o.cancel_status) parts.push(row("Cancellation", o.cancel_status, o.cancel_reason));
+  if (o.return_requested_at) parts.push(row("Return", o.return_status || "pending", o.return_reason));
+  return h("td", { class: "reason-col" }, parts.length ? parts : "\u2014");
+}
 
-// A clickable order card. Pass `reload` to show the Approve / Cancel buttons.
-function orderCard(o, reload) {
-  const actions = [];
-  if (reload && o.status === "pending") actions.push(approveBtn(o, reload));
-  if (reload && ACTIVE.includes(o.status)) actions.push(cancelBtn(o, reload));
-  if (reload) actions.push(...requestButtons(o, reload));
-  return h("div", { class: "row-card clickable", onclick: () => navigate("/admin/orders/" + o.id) },
-    h("div", { class: "row-info" },
-      h("b", {}, "Order #" + o.id, " ", badge(o.status)),
-      h("small", {}, (o.username || o.ship_name || "Deleted account") + " \u00b7 " + when(o.created_at)),
-      h("small", {}, o.items.map(i => i.name + " \u00d7" + i.qty).join(", ")),
-      requestNote(o)),
-    h("div", { class: "row-actions", onclick: e => e.stopPropagation() }, h("b", {}, money(o.total)), actions));
+function ordersTable(orders, reload) {
+  const cols = ["Order", "Customer", "Items", "Placed", "Total", "Status", "Reason"];
+  if (reload) cols.push("Actions");
+  return table(cols, orders.map(o => {
+    const cells = [
+      h("b", {}, "#" + o.id),
+      o.username || o.ship_name || "Deleted account",
+      o.items.map(i => i.name + " \u00d7" + i.qty).join(", "),
+      when(o.created_at), money(o.total),
+      h("td", { class: "status-col" }, badge(o.status)),
+      reasonCell(o)
+    ];
+    if (reload) {
+      const actions = [];
+      const cancelling = o.cancel_status === "pending";
+      if (o.status === "pending" && !cancelling) actions.push(approveBtn(o, reload));
+      if (ACTIVE.includes(o.status) && !cancelling) actions.push(cancelBtn(o, reload));
+      actions.push(...requestButtons(o, reload));
+      cells.push(actionsCell(actions));
+    }
+    return tr(() => navigate("/admin/orders/" + o.id), ...cells);
+  }), "No orders found.");
 }
 
 function viewOrders(box) {
@@ -286,12 +347,12 @@ function viewOrders(box) {
   const status = h("select", {}, h("option", { value: "" }, "All statuses"),
     h("option", { value: "requests", selected: initial === "requests" }, "Needs review (cancel / return)"),
     STATUSES.map(s => h("option", { value: s, selected: s === initial }, label(s))));
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     const q = new URLSearchParams({ search: search.value.trim(), status: status.value });
     const rows = await api("GET", "/api/admin/orders?" + q);
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(o => orderCard(o, load)) : ["No orders found."]));
+    if (rows) list.replaceChildren(ordersTable(rows, load));
   }
 
   search.addEventListener("input", debounce(load));
@@ -320,8 +381,8 @@ async function viewOrder(box, id) {
       h("div", { class: "page-head" },
         h("h1", {}, "Order #" + o.id), badge(o.status),
         o.status !== "cancelled" ? h("button", { class: "secondary-btn", onclick: () => printLabel(o) }, "Print QR label") : "",
-        o.status === "pending" ? approveBtn(o, render) : "",
-        ACTIVE.includes(o.status) ? cancelBtn(o, render) : "",
+        o.status === "pending" && o.cancel_status !== "pending" ? approveBtn(o, render) : "",
+        ACTIVE.includes(o.status) && o.cancel_status !== "pending" ? cancelBtn(o, render) : "",
         requestButtons(o, render)),
       h("div", { class: "panel" }, h("dl", { class: "info-grid" },
         info.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))),
@@ -341,29 +402,29 @@ function viewProducts(box) {
   const search = h("input", { type: "search", placeholder: "Search products" });
   const cat = h("select", {}, h("option", { value: "" }, "All categories"),
     CATEGORIES.map(c => h("option", { value: c }, label(c))));
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     const q = new URLSearchParams({ search: search.value.trim(), category: cat.value });
     const rows = await api("GET", "/api/products?" + q);
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(productRow) : ["No products found."]));
+    if (rows) list.replaceChildren(table(["", "Product", "Category", "Price", "Stock", "Actions"],
+      rows.map(productRow), "No products found."));
   }
 
   function productRow(p) {
-    return h("div", { class: "row-card" },
-      h("div", { class: "row-main" },
-        p.image ? h("img", { class: "thumb", src: p.image, alt: "" }) : h("div", { class: "thumb" }),
-        h("div", { class: "row-info" }, h("b", {}, p.name),
-          h("small", {}, label(p.category) + " \u00b7 " + money(p.price) + " \u00b7 Stock: " + p.amount))),
-      h("div", { class: "row-actions" },
+    const low = p.amount <= 5;
+    return tr(null,
+      p.image ? h("img", { class: "thumb", src: p.image, alt: "" }) : h("div", { class: "thumb" }),
+      h("b", {}, p.name),
+      h("span", { class: "badge" }, label(p.category)),
+      money(p.price),
+      p.amount + (low ? " \u00b7 LOW" : ""),
+      actionsCell([
         h("button", { class: "secondary-btn", onclick: () => productForm(box, p.id) }, "Edit"),
-        h("button", {
-          class: "danger-btn",
-          onclick: async () => {
-            if (!(await confirmAction(`Delete "${p.name}"? This can't be undone.`, "Delete"))) return;
-            if (await api("DELETE", "/api/admin/products/" + p.id)) { toast("Product deleted.", "success"); load(); }
-          }
-        }, "Delete")));
+        h("button", { class: "danger-btn", onclick: async () => {
+          if (!(await confirmAction(`Delete "${p.name}"? This can't be undone.`, "Delete"))) return;
+          if (await api("DELETE", "/api/admin/products/" + p.id)) { toast("Product deleted.", "success"); load(); }
+        } }, "Delete")]));
   }
 
   search.addEventListener("input", debounce(load));
@@ -537,22 +598,20 @@ async function viewChat(box, id) {
 
 function viewLogs(box) {
   const type = h("select", {}, h("option", { value: "" }, "All activity"),
-    h("option", { value: "order" }, "Order updates"), h("option", { value: "stock" }, "Stock changes"));
+    h("option", { value: "order" }, "Order updates"), h("option", { value: "stock" }, "Stock changes"),
+    h("option", { value: "product" }, "Product edits"), h("option", { value: "user" }, "User edits"));
   const search = h("input", { type: "search", placeholder: "Search by person, order # or product" });
-  const list = h("div", { class: "list" });
+  const list = h("div");
 
   async function load() {
     const q = new URLSearchParams({ type: type.value, search: search.value.trim() });
     const rows = await api("GET", "/api/admin/logs?" + q);
-    if (rows) list.replaceChildren(...(rows.length ? rows.map(logRow) : ["No activity yet."]));
-  }
-
-  function logRow(l) {
-    return h("div", { class: "row-card" },
-      h("div", { class: "row-info" },
-        h("b", {}, l.summary),
-        h("small", {}, l.actor + " (" + l.role + ")" + (l.method ? " \u00b7 " + l.method : "") + " \u00b7 " + when(l.created_at))),
-      l.order_id ? h("a", { href: "/admin/orders/" + l.order_id, "data-nav": "" }, "Order #" + l.order_id) : "");
+    if (rows) list.replaceChildren(table(["Time", "Who", "Role", "Type", "Activity", "Order"],
+      rows.map(l => tr(null, when(l.created_at), h("b", {}, l.actor), l.role,
+        h("span", { class: "badge " + l.type }, label(l.type)),
+        l.summary + (l.method ? " (" + l.method + ")" : ""),
+        l.order_id ? h("a", { href: "/admin/orders/" + l.order_id, "data-nav": "" }, "#" + l.order_id) : "")),
+      "No activity yet."));
   }
 
   search.addEventListener("input", debounce(load));

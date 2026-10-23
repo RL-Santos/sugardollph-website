@@ -125,7 +125,7 @@ db.exec(`
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     actor TEXT NOT NULL,
     role TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('order', 'stock')),
+    type TEXT NOT NULL CHECK (type IN ('order', 'stock', 'user', 'product')),
     order_id INTEGER,
     to_status TEXT,
     method TEXT,
