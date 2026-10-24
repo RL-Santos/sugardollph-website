@@ -22,6 +22,18 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024, files: 10 }
 });
 
+// Payment proofs go in a private folder so only admins can see it
+const PROOF_DIR = path.join(__dirname, "private", "proofs");
+fs.mkdirSync(PROOF_DIR, { recursive: true });
+const proofUpload = multer({
+  storage: multer.diskStorage({
+    destination: PROOF_DIR,
+    filename: (req, file, cb) => cb(null, crypto.randomBytes(12).toString("hex") + EXT[file.mimetype])
+  }),
+  fileFilter: (req, file, cb) => file.mimetype in EXT ? cb(null, true) : cb(new Error("bad type")),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 }
+});
+
 const ROLES = ["customer", "admin", "warehouse"];
 
 const db = new Database("shop.db");
@@ -238,7 +250,7 @@ const ACTIVE_ORDER = ["pending", "in_progress", "paid", "packed", "shipped"];
 const REVENUE_ORDER = ["in_progress", "paid", "packed", "shipped", "delivered"];
 
 app.get(["/admin", "/admin/users", "/admin/users/:id", "/admin/products", "/admin/orders", "/admin/orders/:id",
-         "/admin/logs", "/admin/chats", "/admin/chats/:id"],
+         "/admin/discounts", "/admin/logs", "/admin/chats", "/admin/chats/:id"],
   requirePageRole("admin"),
   (req, res) => res.sendFile(path.join(__dirname, "private", "admin.html")));
 
@@ -685,7 +697,8 @@ const withinReturnWindow = s => Date.now() - Date.parse(s.replace(" ", "T") + "Z
 
 app.get("/api/orders", requireLogin, (req, res) => {
   const orders = db.prepare(
-    `SELECT id, status, total, payment_method, created_at, return_requested_at, return_reason,
+    `SELECT id, status, total, subtotal, discount_code, discount_amount, payment_method, payment_detail,
+       created_at, return_requested_at, return_reason,
        cancel_status, cancel_reason, return_status, ${DELIVERED_AT} AS delivered_at
      FROM orders WHERE user_id = ? ORDER BY id DESC`
   ).all(req.uid);
@@ -696,6 +709,36 @@ app.get("/api/orders", requireLogin, (req, res) => {
     can_return: o.status === "delivered" && !o.return_requested_at && withinReturnWindow(o.delivered_at),
     items: items.all(o.id)
   })));
+});
+
+// What the customer reads for each logged step
+const TRACK_TEXT = {
+  in_progress: "Order accepted. The shop is preparing your parcel.",
+  packed: "Your parcel has been packed.",
+  shipped: "Your parcel was handed to the courier and is on its way.",
+  delivered: "Your parcel was delivered.",
+  cancelled: "Your order was cancelled.",
+  returned: "Your returned parcel was received by the shop.",
+  cancel_declined: "Your cancellation request was declined.",
+  return_approved: "Your return was approved. Please send the parcel back to the shop.",
+  return_declined: "Your return request was declined."
+};
+
+const TRACK_DECISION = { cancel: ["cancel_declined", "cancelled"], return: ["return_declined", "return_approved"] };
+
+app.get("/api/orders/:id/tracking", requireLogin, (req, res) => {
+  const o = db.prepare(
+    "SELECT id, created_at, cancel_requested_at, return_requested_at FROM orders WHERE id = ? AND user_id = ?"
+  ).get(Number(req.params.id), req.uid);
+  if (!o) return res.status(404).json({ error: "Order not found." });
+  const events = [{ at: o.created_at, text: "Order placed. Waiting for the shop to accept it." }];
+  if (o.cancel_requested_at) events.push({ at: o.cancel_requested_at, text: "You asked to cancel this order." });
+  if (o.return_requested_at) events.push({ at: o.return_requested_at, text: "You asked to return this order." });
+  db.prepare("SELECT to_status, created_at FROM activity_log WHERE order_id = ? AND to_status IS NOT NULL ORDER BY id")
+    .all(o.id)
+    .forEach(l => { if (TRACK_TEXT[l.to_status]) events.push({ at: l.created_at, text: TRACK_TEXT[l.to_status] }); });
+  events.sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
+  res.json(events.reverse()); // newest first
 });
 
 // The customer confirms the parcel arrived
@@ -714,24 +757,32 @@ app.put("/api/orders/:id/received", requireLogin, (req, res) => {
 
 // The customer asks to send a delivered order back. The warehouse finishes it by scanning the parcel as Returned.
 app.put("/api/orders/:id/return", requireLogin, (req, res) => {
-  const id = Number(req.params.id);
-  const reason = String(req.body.reason || "").trim().slice(0, 200);
-  if (reason.length < 3) return res.status(400).json({ error: "Please tell us why you're returning it." });
-  const o = db.prepare(
-    `SELECT status, return_requested_at, ${DELIVERED_AT} AS delivered_at FROM orders WHERE id = ? AND user_id = ?`
-  ).get(id, req.uid);
-  if (!o) return res.status(404).json({ error: "Order not found." });
-  if (o.status !== "delivered") return res.status(400).json({ error: "Only delivered orders can be returned." });
-  if (o.return_requested_at) return res.status(400).json({ error: "A return was already requested for this order." });
-  if (!withinReturnWindow(o.delivered_at)) {
-    return res.status(400).json({ error: "Returns are accepted within " + RETURN_DAYS + " days of delivery." });
-  }
-  db.transaction(() => {
-    db.prepare("UPDATE orders SET return_requested_at = CURRENT_TIMESTAMP, return_status = 'pending', return_reason = ? WHERE id = ?").run(reason, id);
-    logActivity(req.uid, "customer", "order", "Return requested for order #" + id + ": " + reason, id, null, "customer");
-  })();
-  notifyAdmins("Return requested", "Order #" + id + ": " + reason, "/admin/orders/" + id);
-  res.json({ ok: true });
+  proofUpload.single("proof")(req, res, err => {
+    const file = req.file;
+    const fail = (code, error) => { if (file) fs.unlink(file.path, () => {}); return res.status(code).json({ error }); };
+    if (err) return fail(400, "The proof must be a JPG, PNG or WEBP picture up to 5 MB.");
+
+    const id = Number(req.params.id);
+    const reason = String((req.body && req.body.reason) || "").trim().slice(0, 200);
+    if (reason.length < 3) return fail(400, "Please tell us why you're returning it.");
+    const o = db.prepare(
+      `SELECT status, payment_method, return_requested_at, ${DELIVERED_AT} AS delivered_at FROM orders WHERE id = ? AND user_id = ?`
+    ).get(id, req.uid);
+    if (!o) return fail(404, "Order not found.");
+    if (o.status !== "delivered") return fail(400, "Only delivered orders can be returned.");
+    if (o.return_requested_at) return fail(400, "A return was already requested for this order.");
+    if (!withinReturnWindow(o.delivered_at)) return fail(400, "Returns are accepted within " + RETURN_DAYS + " days of delivery.");
+    if (file && o.payment_method === "COD") return fail(400, "Proof of payment is only for online payments.");
+
+    db.transaction(() => {
+      db.prepare("UPDATE orders SET return_requested_at = CURRENT_TIMESTAMP, return_status = 'pending', return_reason = ?, payment_proof = ? WHERE id = ?")
+        .run(reason, file ? file.filename : null, id);
+      logActivity(req.uid, "customer", "order",
+        "Return requested for order #" + id + ": " + reason + (file ? " (proof attached)" : ""), id, null, "customer");
+    })();
+    notifyAdmins("Return requested", "Order #" + id + ": " + reason, "/admin/orders/" + id);
+    res.json({ ok: true });
+  });
 });
 
 app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
@@ -753,23 +804,40 @@ app.put("/api/orders/:id/cancel", requireLogin, (req, res) => {
 app.post("/api/checkout", requireLogin, (req, res) => {
   const cart = readCart(req.uid);
   if (cart.length === 0) return res.status(400).json({ error: "Your cart is empty." });
-  if (String(req.body.payment_method || "COD") !== "COD") {
-    return res.status(400).json({ error: "Only cash on delivery is available right now." });
+
+  // Cash on delivery, or one of the customer's saved GCash / Maya / card entries
+  let method = "COD", detail = "";
+  if (req.body.payment_id) {
+    const pm = db.prepare("SELECT * FROM payment_methods WHERE id = ? AND user_id = ?")
+      .get(Number(req.body.payment_id), req.uid);
+    if (!pm) return res.status(400).json({ error: "Pick a payment method." });
+    method = pm.type;
+    detail = payDetail(pm);
+  } else if (String(req.body.payment_method || "COD") !== "COD") {
+    return res.status(400).json({ error: "Pick a payment method." });
   }
+
   const addrId = Number(req.body.address_id);
   const addr = addrId
     ? db.prepare("SELECT * FROM addresses WHERE id = ? AND user_id = ?").get(addrId, req.uid)
     : db.prepare("SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, id LIMIT 1").get(req.uid);
   if (!addr) return res.status(400).json({ error: "Pick a delivery address." });
 
-  const total = cart.reduce((n, i) => n + i.price * i.qty, 0);
+  const subtotal = cart.reduce((n, i) => n + i.price * i.qty, 0);
+  const disc = applyDiscount(req.body.discount_code, subtotal);
+  if (disc.error) return res.status(400).json({ error: disc.error });
+  const discount = disc.none ? 0 : disc.amount;
+  const total = Math.round((subtotal - discount) * 100) / 100;
   const shipAddress = [addr.street, addr.barangay, addr.city, addr.province, addr.postal_code].filter(Boolean).join(", ");
+
   try {
     const orderId = db.transaction(() => {
       const info = db.prepare(
-        `INSERT INTO orders (user_id, status, total, payment_method, ship_name, ship_phone, ship_address)
-         VALUES (?, 'pending', ?, 'COD', ?, ?, ?)`
-      ).run(req.uid, total, addr.recipient_name, addr.phone, shipAddress);
+        `INSERT INTO orders (user_id, status, total, subtotal, discount_code, discount_amount,
+           payment_method, payment_detail, ship_name, ship_phone, ship_address)
+         VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(req.uid, total, subtotal, disc.none ? null : disc.d.code, discount,
+            method, detail, addr.recipient_name, addr.phone, shipAddress);
       const addItem = db.prepare(
         "INSERT INTO order_items (order_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)");
       const takeStock = db.prepare("UPDATE products SET amount = amount - ? WHERE id = ? AND amount >= ?");
@@ -777,14 +845,21 @@ app.post("/api/checkout", requireLogin, (req, res) => {
         if (takeStock.run(i.qty, i.id, i.qty).changes === 0) throw new Error("out of stock");
         addItem.run(info.lastInsertRowid, i.id, i.name, i.price, i.qty);
       });
+      if (!disc.none && db.prepare(
+          "UPDATE discount_codes SET used = used + 1 WHERE id = ? AND (max_uses IS NULL OR used < max_uses)"
+        ).run(disc.d.id).changes === 0) {
+        throw new Error("code used up");
+      }
       db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
       return Number(info.lastInsertRowid);
     })();
     notifyOrder(orderId, "pending");
     notifyAdmins("New order", "Order #" + orderId + " is waiting for approval.", "/admin/orders/" + orderId);
     res.json({ orderId });
-  } catch {
-    res.status(400).json({ error: "Some items just ran out of stock. Please check your cart." });
+  } catch (e) {
+    res.status(400).json({ error: e.message === "code used up"
+      ? "That code was just fully used."
+      : "Some items just ran out of stock. Please check your cart." });
   }
 });
 
@@ -846,10 +921,103 @@ app.delete("/api/addresses/:id", requireLogin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- PAYMENT INFO + DISCOUNT CODES ----------
+const PAY_TYPES = { GCASH: "GCash", MAYA: "Maya", CARD: "Credit / debit card" };
+const MAX_PAYMENTS = 10;
+
+const payDetail = p => p.type === "CARD"
+  ? PAY_TYPES.CARD + " ending " + p.number
+  : PAY_TYPES[p.type] + " " + p.number.slice(0, 4) + "***" + p.number.slice(-3);
+
+// For cards only the last 4 digits are kept, and there is no CVV
+function readPayment(b) {
+  const type = String(b.type || "");
+  const holder = String(b.holder_name || "").trim().slice(0, 60);
+  if (!Object.hasOwn(PAY_TYPES, type)) return { error: "Pick a payment type." };
+  if (!holder) return { error: "Enter the account holder name." };
+  if (type !== "CARD") {
+    const phone = cleanPhone(b.mobile);
+    if (!phone) return { error: "Enter a valid mobile number (09XXXXXXXXX)." };
+    return { p: { type, holder, number: phone, expiry: null } };
+  }
+  const digits = String(b.card_number || "").replace(/[\s-]/g, "");
+  if (!/^\d{13,19}$/.test(digits)) return { error: "Enter a valid card number." };
+  const m = String(b.expiry || "").trim().match(/^(0[1-9]|1[0-2])\s*\/\s*(\d{2})$/);
+  if (!m) return { error: "Enter the expiry as MM/YY." };
+  const now = new Date();
+  const year = 2000 + Number(m[2]);
+  if (year < now.getFullYear() || (year === now.getFullYear() && Number(m[1]) < now.getMonth() + 1)) {
+    return { error: "This card has expired." };
+  }
+  return { p: { type, holder, number: digits.slice(-4), expiry: m[1] + "/" + m[2] } };
+}
+
+app.get("/api/payment-methods", requireLogin, (req, res) => {
+  res.json(db.prepare("SELECT * FROM payment_methods WHERE user_id = ? ORDER BY is_default DESC, id").all(req.uid));
+});
+
+app.post("/api/payment-methods", requireLogin, (req, res) => {
+  const r = readPayment(req.body);
+  if (r.error) return res.status(400).json({ error: r.error });
+  const count = db.prepare("SELECT COUNT(*) AS n FROM payment_methods WHERE user_id = ?").get(req.uid).n;
+  if (count >= MAX_PAYMENTS) {
+    return res.status(400).json({ error: "You can save up to " + MAX_PAYMENTS + " payment methods." });
+  }
+  db.prepare("INSERT INTO payment_methods (user_id, type, holder_name, number, expiry, is_default) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(req.uid, r.p.type, r.p.holder, r.p.number, r.p.expiry, count === 0 ? 1 : 0); // the first one is the default
+  res.json({ ok: true });
+});
+
+app.put("/api/payment-methods/:id/default", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.prepare("SELECT 1 FROM payment_methods WHERE id = ? AND user_id = ?").get(id, req.uid)) {
+    return res.status(404).json({ error: "Payment info not found." });
+  }
+  db.transaction(() => {
+    db.prepare("UPDATE payment_methods SET is_default = 0 WHERE user_id = ?").run(req.uid);
+    db.prepare("UPDATE payment_methods SET is_default = 1 WHERE id = ?").run(id);
+  })();
+  res.json({ ok: true });
+});
+
+app.delete("/api/payment-methods/:id", requireLogin, (req, res) => {
+  const id = Number(req.params.id);
+  const row = db.prepare("SELECT is_default FROM payment_methods WHERE id = ? AND user_id = ?").get(id, req.uid);
+  if (!row) return res.status(404).json({ error: "Payment info not found." });
+  db.transaction(() => {
+    db.prepare("DELETE FROM payment_methods WHERE id = ?").run(id);
+    if (row.is_default) {
+      db.prepare(`UPDATE payment_methods SET is_default = 1
+                  WHERE id = (SELECT MIN(id) FROM payment_methods WHERE user_id = ?)`).run(req.uid);
+    }
+  })();
+  res.json({ ok: true });
+});
+
+// Checks a discount code against a subtotal
+function applyDiscount(codeText, subtotal) {
+  const code = String(codeText || "").trim();
+  if (!code) return { none: true };
+  const d = db.prepare("SELECT * FROM discount_codes WHERE code = ?").get(code);
+  if (!d || !d.active) return { error: "That code isn't valid." };
+  if (d.expires_on && d.expires_on < today()) return { error: "That code has expired." };
+  if (d.max_uses != null && d.used >= d.max_uses) return { error: "That code has been fully used." };
+  if (subtotal < d.min_spend) return { error: "Spend at least PHP " + d.min_spend.toFixed(2) + " to use this code." };
+  const off = d.type === "percent" ? Math.round(subtotal * d.value) / 100 : d.value;
+  return { d, amount: Math.min(subtotal, off) };
+}
+
+app.post("/api/discount/check", requireLogin, (req, res) => {
+  const subtotal = readCart(req.uid).reduce((n, i) => n + i.price * i.qty, 0);
+  const r = applyDiscount(req.body.code, subtotal);
+  if (r.none) return res.status(400).json({ error: "Enter a discount code." });
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ code: r.d.code, amount: r.amount });
+});
+
 // ---------- CUSTOMER SERVICE CHAT ----------
 const AUTO_TOPICS = ["order_status", "cancel_order", "return_refund", "account"];
 
-// Instant answers to common questions. Stored as an "admin" message with no sender id = Sugardoll Assistant.
 function autoReply(topic, uid) {
   let text = null;
   if (topic === "order_status") {
@@ -916,7 +1084,6 @@ function addMessage(chatId, sender, senderId, body) {
   db.prepare("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(chatId);
 }
 
-// Messages newer than `after`. Admin messages carry the admin's first name.
 function chatMessages(chatId, after) {
   return db.prepare(
     `SELECT m.id, m.sender, m.body, m.created_at, COALESCE(NULLIF(p.first_name, ''), u.username, 'Sugardoll Assistant') AS name
@@ -1325,7 +1492,7 @@ app.put("/api/admin/orders/:id/requests/:kind", admin, (req, res) => {
     }
     logActivity(adminIdOf(req), "admin", "order",
       (kind === "cancel" ? "Cancellation" : "Return") + " request for order #" + id + (approve ? " approved" : " rejected"),
-      id, kind === "cancel" && approve ? "cancelled" : null, "manual");
+      id, TRACK_DECISION[kind][approve ? 1 : 0], "manual");
   })();
 
   if (kind === "cancel" && approve) {
@@ -1384,6 +1551,58 @@ function cancelStaleOrders(day) {
     notifyAdmins("Order auto-cancelled", summary + ".", "/admin/orders/" + o.id);
   });
 }
+
+// ----- discount codes -----
+app.get("/api/admin/discounts", admin, (req, res) => {
+  res.json(db.prepare("SELECT * FROM discount_codes ORDER BY id DESC").all());
+});
+
+app.post("/api/admin/discounts", admin, (req, res) => {
+  const b = req.body;
+  const blank = k => String(b[k] ?? "").trim() === "";
+  const code = String(b.code || "").trim().toUpperCase();
+  const type = b.type === "fixed" ? "fixed" : "percent";
+  const value = num(b.value);
+  const minSpend = blank("min_spend") ? 0 : num(b.min_spend);
+  const maxUses = blank("max_uses") ? null : num(b.max_uses);
+  const expires = String(b.expires_on || "").trim() || null;
+
+  if (!/^[A-Z0-9_-]{3,20}$/.test(code)) return res.status(400).json({ error: "Code must be 3-20 letters, numbers, - or _." });
+  if (!Number.isFinite(value) || value <= 0 || (type === "percent" && value > 100)) {
+    return res.status(400).json({ error: type === "percent" ? "Percent must be between 1 and 100." : "Enter a valid amount." });
+  }
+  if (!Number.isFinite(minSpend) || minSpend < 0) return res.status(400).json({ error: "Minimum spend must be 0 or more." });
+  if (maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
+    return res.status(400).json({ error: "Max uses must be a whole number of 1 or more." });
+  }
+  if (expires && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) return res.status(400).json({ error: "Pick a valid expiry date." });
+  if (db.prepare("SELECT 1 FROM discount_codes WHERE code = ?").get(code)) {
+    return res.status(409).json({ error: "That code already exists." });
+  }
+  db.prepare("INSERT INTO discount_codes (code, type, value, min_spend, max_uses, expires_on) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(code, type, value, minSpend, maxUses, expires);
+  res.json({ ok: true });
+});
+
+app.put("/api/admin/discounts/:id/active", admin, (req, res) => {
+  const info = db.prepare("UPDATE discount_codes SET active = ? WHERE id = ?")
+    .run(req.body.active ? 1 : 0, Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: "Code not found." });
+  res.json({ ok: true });
+});
+
+app.delete("/api/admin/discounts/:id", admin, (req, res) => {
+  const info = db.prepare("DELETE FROM discount_codes WHERE id = ?").run(Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: "Code not found." });
+  res.json({ ok: true });
+});
+
+// Payment proof picture (admins only)
+app.get("/api/admin/orders/:id/proof", admin, (req, res) => {
+  const o = db.prepare("SELECT payment_proof FROM orders WHERE id = ?").get(Number(req.params.id));
+  if (!o || !o.payment_proof) return res.status(404).json({ error: "No proof uploaded." });
+  res.sendFile(path.join(PROOF_DIR, path.basename(o.payment_proof)));
+});
 
 function runDailyJobs() {
   const day = today();

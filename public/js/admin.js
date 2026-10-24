@@ -97,6 +97,7 @@ const routes = [
   [/^\/admin\/products\/?$/, viewProducts],
   [/^\/admin\/orders\/?$/, viewOrders],
   [/^\/admin\/orders\/(\d+)$/, viewOrder],
+  [/^\/admin\/discounts\/?$/, viewDiscounts],
   [/^\/admin\/logs\/?$/, viewLogs],
   [/^\/admin\/chats\/?$/, viewChats],
   [/^\/admin\/chats\/(\d+)$/, viewChat]
@@ -371,10 +372,14 @@ async function viewOrder(box, id) {
       ["Recipient", o.ship_name || "\u2014"],
       ["Mobile", o.ship_phone || "\u2014"],
       ["Address", o.ship_address || "\u2014"],
-      ["Payment", o.payment_method === "COD" ? "Cash on delivery (COD)" : o.payment_method || "\u2014"],
+      ["Payment", o.payment_method === "COD" ? "Cash on delivery (COD)" : o.payment_detail || o.payment_method || "\u2014"],
+      ...(o.discount_amount > 0 ? [["Discount", o.discount_code + " (-" + money(o.discount_amount) + ")"]] : []),
       ["Placed", when(o.created_at)],
       ...(o.cancel_status ? [["Cancellation request", label(o.cancel_status) + (o.cancel_reason ? " \u2014 " + o.cancel_reason : "")]] : []),
-      ...(o.return_requested_at ? [["Return request", label(o.return_status || "pending") + " \u2014 " + o.return_reason]] : [])
+      ...(o.return_requested_at ? [["Return request", label(o.return_status || "pending") + " \u2014 " + o.return_reason]] : []),
+      ...(o.return_requested_at && o.payment_method !== "COD" ? [["Payment proof", o.payment_proof
+        ? h("a", { href: "/api/admin/orders/" + o.id + "/proof", target: "_blank" }, "View picture")
+        : "Not uploaded"]] : [])
     ];
     box.replaceChildren(
       backLink("/admin/orders", "Back to orders"),
@@ -592,6 +597,66 @@ async function viewChat(box, id) {
   box.append(backLink("/admin/chats", "Back to chats"), head, log, note, compose);
   await refresh();
   poll(box, refresh);
+}
+
+// ---------- discounts ----------
+
+function viewDiscounts(box) {
+  const list = h("div");
+  const code = h("input", { type: "text", maxlength: "20", placeholder: "e.g. SUMMER10" });
+  const type = h("select", {}, h("option", { value: "percent" }, "Percent (%)"), h("option", { value: "fixed" }, "Fixed amount (PHP)"));
+  const value = h("input", { type: "number", min: "0", step: "0.01", placeholder: "10" });
+  const min = h("input", { type: "number", min: "0", step: "0.01", placeholder: "Optional" });
+  const uses = h("input", { type: "number", min: "1", step: "1", placeholder: "Optional" });
+  const expires = h("input", { type: "date" });
+  const field = (text, input) => h("label", { class: "field" }, text, input);
+
+  async function create() {
+    const body = { code: code.value, type: type.value, value: value.value, min_spend: min.value,
+      max_uses: uses.value, expires_on: expires.value };
+    if (!(await api("POST", "/api/admin/discounts", body))) return;
+    toast("Discount code created.", "success");
+    [code, value, min, uses, expires].forEach(i => { i.value = ""; });
+    load();
+  }
+
+  async function load() {
+    const rows = await api("GET", "/api/admin/discounts");
+    if (rows) list.replaceChildren(table(["Code", "Discount", "Min. spend", "Used", "Expires", "Status", "Actions"],
+      rows.map(row), "No discount codes yet."));
+  }
+
+  function row(d) {
+    const todayStr = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10); // Manila date
+    const state = !d.active ? ["Inactive", "shipped"]
+      : d.expires_on && d.expires_on < todayStr ? ["Expired", "shipped"]
+      : d.max_uses != null && d.used >= d.max_uses ? ["Used up", "shipped"]
+      : ["Active", "delivered"];
+    return tr(null,
+      h("b", {}, d.code),
+      d.type === "percent" ? d.value + "% off" : money(d.value) + " off",
+      d.min_spend ? money(d.min_spend) : "\u2014",
+      d.used + (d.max_uses != null ? " / " + d.max_uses : ""),
+      d.expires_on || "No expiry",
+      h("span", { class: "badge " + state[1] }, state[0]),
+      actionsCell([
+        h("button", { class: "secondary-btn", onclick: async () => {
+          if (await api("PUT", `/api/admin/discounts/${d.id}/active`, { active: !d.active })) load();
+        } }, d.active ? "Deactivate" : "Activate"),
+        h("button", { class: "danger-btn", onclick: async () => {
+          if (!(await confirmAction(`Delete code ${d.code}?`, "Delete"))) return;
+          if (await api("DELETE", "/api/admin/discounts/" + d.id)) { toast("Code deleted.", "success"); load(); }
+        } }, "Delete")]));
+  }
+
+  box.append(
+    h("div", { class: "page-head" }, h("h1", {}, "Discount codes")),
+    h("div", { class: "panel form" }, h("h2", {}, "Create a code"),
+      field("Code", code), field("Type", type), field("Value", value),
+      field("Minimum spend (PHP)", min), field("Max uses", uses), field("Expires on", expires),
+      h("button", { class: "primary-btn", onclick: create }, "Create code")),
+    h("h2", {}, "Codes"), list);
+  load();
 }
 
 // ---------- logs + QR label ----------

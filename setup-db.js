@@ -133,6 +133,29 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS payment_methods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('GCASH', 'MAYA', 'CARD')),
+    holder_name TEXT NOT NULL,
+    number TEXT NOT NULL,
+    expiry TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS discount_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    type TEXT NOT NULL CHECK (type IN ('percent', 'fixed')),
+    value REAL NOT NULL CHECK (value > 0),
+    min_spend REAL NOT NULL DEFAULT 0,
+    max_uses INTEGER,
+    used INTEGER NOT NULL DEFAULT 0,
+    expires_on TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE INDEX IF NOT EXISTS idx_activity_order ON activity_log(order_id);
 
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, id);
@@ -149,9 +172,16 @@ if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")
   db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
 }
 
+const moreCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
+for (const [name, def] of [["payment_detail", "TEXT"], ["subtotal", "REAL"], ["discount_code", "TEXT"],
+                           ["discount_amount", "REAL NOT NULL DEFAULT 0"], ["payment_proof", "TEXT"]]) {
+  if (!moreCols.includes(name)) db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${def}`);
+}
+
 // cancel / return requests that need admin approval
 const ordCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
-for (const col of ["cancel_status", "cancel_requested_at", "cancel_reason", "return_status"]) {
+for (const col of ["cancel_status", "cancel_requested_at", "cancel_reason", "return_status",
+                   "return_requested_at", "return_reason"]) {
   if (!ordCols.includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} TEXT`);
 }
 db.exec("UPDATE orders SET return_status = 'pending' WHERE return_requested_at IS NOT NULL AND return_status IS NULL AND status = 'delivered'");

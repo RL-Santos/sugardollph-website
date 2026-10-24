@@ -647,10 +647,87 @@ async function renderProfile(box) {
   );
 }
 
+const PAY_NAMES = { GCASH: "GCash", MAYA: "Maya", CARD: "Credit / debit card" };
+const payLine = m => m.holder_name + " \u00b7 " +
+  (m.type === "CARD" ? "ending " + m.number + " \u00b7 exp " + m.expiry : m.number);
+
+async function reloadPayments() {
+  const box = document.getElementById("account-content");
+  box.innerHTML = "";
+  await renderPayment(box);
+}
+
 async function renderPayment(box) {
-  const p = document.createElement("p");
-  p.textContent = "Payment info is coming soon.";
-  box.append(makeHeading("Payment info"), p);
+  const res = await fetch("/api/payment-methods");
+  if (!res.ok) return;
+  const list = await res.json();
+  box.appendChild(makeHeading("Payment info"));
+  if (list.length === 0) box.appendChild(el("p", "", "You have no saved payment info yet."));
+
+  list.forEach(m => {
+    const card = el("div", "order-card address-card");
+    const head = el("div", "order-head");
+    head.appendChild(el("b", "", PAY_NAMES[m.type]));
+    if (m.is_default) head.appendChild(el("span", "badge", "Default"));
+    card.append(head, el("div", "", payLine(m)));
+
+    const actions = el("div", "address-actions");
+    if (!m.is_default) {
+      actions.appendChild(makeButton("Set as default", async () => {
+        if (await send("PUT", "/api/payment-methods/" + m.id + "/default", {})) reloadPayments();
+      }, "secondary-btn"));
+    }
+    actions.appendChild(makeButton("Delete", async () => {
+      if (!(await confirmAction("Delete this payment info?", "Delete"))) return;
+      if (await send("DELETE", "/api/payment-methods/" + m.id)) {
+        showToast("Payment info deleted.", "success");
+        reloadPayments();
+      }
+    }, "secondary-btn"));
+    card.appendChild(actions);
+    box.appendChild(card);
+  });
+
+  if (list.length < 10) box.appendChild(makeButton("+ Add payment info", showPaymentForm));
+}
+
+function showPaymentForm() {
+  const box = document.getElementById("account-content");
+  box.innerHTML = "";
+  const type = el("select");
+  Object.entries(PAY_NAMES).forEach(([key, name]) => {
+    const o = el("option", "", name);
+    o.value = key;
+    type.appendChild(o);
+  });
+  const typeField = el("label", "field", "Type");
+  typeField.appendChild(type);
+
+  const holder = makeField("Account holder name", "pm-holder", "");
+  const mobile = makeField("Mobile number", "pm-mobile", "", "tel");
+  const number = makeField("Card number", "pm-number", "");
+  const expiry = makeField("Expiry (MM/YY)", "pm-expiry", "");
+  const note = el("p", "chat-note", "For cards we only keep the last 4 digits. The CVV is never asked for or saved.");
+
+  const sync = () => {
+    const card = type.value === "CARD";
+    mobile.hidden = card;
+    number.hidden = expiry.hidden = note.hidden = !card;
+  };
+  type.onchange = sync;
+  sync();
+
+  const actions = el("div", "address-actions");
+  actions.append(
+    makeButton("Save", async () => {
+      const data = await send("POST", "/api/payment-methods", {
+        type: type.value, holder_name: val("pm-holder"), mobile: val("pm-mobile"),
+        card_number: val("pm-number"), expiry: val("pm-expiry")
+      });
+      if (data) { showToast("Payment info saved.", "success"); reloadPayments(); }
+    }),
+    makeButton("Cancel", reloadPayments, "secondary-btn"));
+  box.append(makeHeading("Add payment info"), typeField, holder, mobile, number, expiry, note, actions);
 }
 
 async function reloadAddresses() {
@@ -834,7 +911,7 @@ const CANCEL_REASONS = [
   "Others"
 ];
 
-function askReason(card, btn, placeholder, sendLabel, onSend, options) {
+function askReason(card, btn, placeholder, sendLabel, onSend, options, extra) {
   btn.remove();
   const group = "reason-" + Math.random().toString(36).slice(2);
   const reason = document.createElement("textarea");
@@ -873,7 +950,7 @@ function askReason(card, btn, placeholder, sendLabel, onSend, options) {
   const actions = document.createElement("div");
   actions.className = "address-actions";
   actions.append(makeButton(sendLabel, submit), makeButton("Back", route, "secondary-btn"));
-  card.append(reason, actions);
+  card.append(reason, ...(extra ? [extra] : []), actions);
 }
 
 function orderState(o) {
@@ -891,6 +968,43 @@ function orderState(o) {
     else if (o.return_status === "rejected") text = "Delivered. Your return request was declined.";
   }
   return { badge, text };
+}
+
+const TRACK_STEPS = ["Placed", "Accepted", "Packed", "Shipped", "Delivered"];
+const STEP_OF = { pending: 0, in_progress: 1, paid: 1, packed: 2, shipped: 3, delivered: 4 };
+
+// Adds a "Track order" button that opens the order's timeline inside its card
+function addTracking(card, o) {
+  let box = null;
+  const btn = makeButton("Track order", async () => {
+    if (box) { box.remove(); box = null; btn.textContent = "Track order"; return; }
+    const res = await fetch("/api/orders/" + o.id + "/tracking");
+    if (!res.ok) return showToast("Couldn't load tracking.", "error");
+    const events = await res.json();
+    box = el("div", "track");
+    if (o.status in STEP_OF) {
+      const steps = el("div", "track-steps");
+      TRACK_STEPS.forEach((name, i) => steps.append(el("span", i <= STEP_OF[o.status] ? "done" : "", name)));
+      box.append(steps);
+    }
+    events.forEach((e, i) => {
+      const row = el("div", "track-row" + (i === 0 ? " latest" : ""));
+      row.append(el("small", "", new Date(e.at.replace(" ", "T") + "Z").toLocaleString()), el("span", "", e.text));
+      box.append(row);
+    });
+    btn.after(box);
+    btn.textContent = "Hide tracking";
+  }, "secondary-btn");
+  card.appendChild(btn);
+}
+
+function makeProofField() {
+  const input = el("input");
+  input.type = "file";
+  input.accept = "image/jpeg,image/png,image/webp";
+  const label = el("label", "field", "Proof of payment (optional, JPG, PNG or WEBP, 5 MB max)");
+  label.appendChild(input);
+  return label;
 }
 
 function renderOrderList(box, title, orders, emptyText) {
@@ -929,6 +1043,13 @@ function renderOrderList(box, title, orders, emptyText) {
     const total = document.createElement("b");
     total.textContent = "Total: PHP " + o.total.toFixed(2);
     card.appendChild(total);
+        
+    if (o.discount_amount > 0) {
+      card.appendChild(el("small", "", "Discount " + o.discount_code + ": -PHP " + o.discount_amount.toFixed(2)));
+    }
+    card.appendChild(el("small", "", "Payment: " +
+      (o.payment_method === "COD" ? "Cash on delivery" : o.payment_detail || o.payment_method)));
+    addTracking(card, o);
 
     if (o.status === "delivered" && o.return_reason) {
       const why = document.createElement("small");
@@ -957,13 +1078,19 @@ function renderOrderList(box, title, orders, emptyText) {
     }
 
     if (o.can_return) {
+      const proof = o.payment_method !== "COD" ? makeProofField() : null; // online payments only
       const btn = makeButton("Return this order", () =>
         askReason(card, btn, "Why are you returning it?", "Send return request", async reason => {
-          if (await send("PUT", "/api/orders/" + o.id + "/return", { reason })) {
-            showToast("Return requested. We'll notify you once it's reviewed.", "success");
-            navigate("/purchases/returns");
-          }
-        }), "secondary-btn");
+          const fd = new FormData();
+          fd.append("reason", reason);
+          const file = proof && proof.querySelector("input").files[0];
+          if (file) fd.append("proof", file);
+          const res = await fetch("/api/orders/" + o.id + "/return", { method: "PUT", body: fd });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) return showToast(data.error || "Something went wrong.", "error");
+          showToast("Return requested. We'll notify you once it's reviewed.", "success");
+          navigate("/purchases/returns");
+        }, null, proof), "secondary-btn");
       card.appendChild(btn);
     }
     box.appendChild(card);

@@ -553,3 +553,25 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #3A2D28; }
 .co-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; }
 .co-actions b { margin-right: auto; }
 .co-actions .primary-btn { width: auto; }
+
+.field select { display: block; width: 100%; margin-top: 6px; padding: 11px 14px; border: 1px solid #CBAD8D; border-radius: 8px; background: #F1E7DD; font: inherit; }
+
+/* ---------- Discount code at checkout ---------- */
+.co-code { display: flex; gap: 8px; }
+.co-code input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid #CBAD8D; border-radius: 8px; background: #F1EDE6; font: inherit; text-transform: uppercase; }
+.co-code .secondary-btn { white-space: nowrap; }
+.co-code-msg { display: block; min-height: 1.2em; margin-top: 4px; color: #3A2D28; }
+
+/* ---------- Order tracking ---------- */
+.track { margin-top: 6px; padding-top: 12px; border-top: 1px solid #D1C7BD; }
+.track-steps { display: flex; margin-bottom: 14px; font-size: 0.75rem; }
+.track-steps span { position: relative; flex: 1; padding-top: 16px; text-align: center; color: #988780; }
+.track-steps span::before { content: ""; position: absolute; top: 0; left: 50%; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: #D1C7BD; }
+.track-steps span.done { color: #3A2D28; font-weight: 600; }
+.track-steps span.done::before { background: #A57756; }
+.track-row { position: relative; display: flex; flex-direction: column; gap: 2px; margin-left: 4px; padding: 0 0 12px 18px; border-left: 2px solid #D1C7BD; }
+.track-row::before { content: ""; position: absolute; left: -6px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: #D1C7BD; }
+.track-row.latest::before { background: #A57756; }
+.track-row.latest span { font-weight: 600; }
+.track-row small { color: #988780; }
+.track-row:last-child { padding-bottom: 0; border-left-color: transparent; }

@@ -1,3 +1,4 @@
 node_modules/
 shop.db
 .env
+private/proofs/
