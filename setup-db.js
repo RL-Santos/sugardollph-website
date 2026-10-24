@@ -3,47 +3,16 @@ const bcrypt = require("bcrypt");
 
 const db = new Database("shop.db");
 
-// ---------- TABLES ----------
-
-// Orders now allow the 'in_progress' status. Recreate the (still empty) orders tables once.
-const oldOrders = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'orders'").get();
-if (oldOrders && !oldOrders.sql.includes("in_progress")) {
-  if (db.prepare("SELECT COUNT(*) AS n FROM orders").get().n > 0) {
-    throw new Error("orders table has data; migrate it manually");
-  }
-  db.exec("DROP TABLE order_items; DROP TABLE orders;");
-}
-
 db.exec(`
+  -- ---------- accounts ----------
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('customer', 'admin', 'warehouse'))
+    role TEXT NOT NULL CHECK (role IN ('customer', 'admin', 'warehouse')),
+    active INTEGER NOT NULL DEFAULT 1
   );
 
-  CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    description TEXT NOT NULL,
-    price REAL NOT NULL DEFAULT 0,
-    amount INTEGER NOT NULL DEFAULT 0,
-    category TEXT NOT NULL CHECK (category IN ('jeans', 'trousers', 'tops', 'others'))
-  );
-
-  CREATE TABLE IF NOT EXISTS product_images (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    path TEXT NOT NULL
-  );
-  
-  CREATE TABLE IF NOT EXISTS cart_items (
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    qty INTEGER NOT NULL CHECK (qty > 0),
-    PRIMARY KEY (user_id, product_id)
-  );
-  
   CREATE TABLE IF NOT EXISTS customer_profiles (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     first_name TEXT NOT NULL,
@@ -69,16 +38,75 @@ db.exec(`
     is_default INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS payment_methods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('GCASH', 'MAYA', 'CARD')),
+    holder_name TEXT NOT NULL,
+    number TEXT NOT NULL,            -- mobile number, or only the last 4 digits for cards
+    expiry TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- ---------- products + cart ----------
+  CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL,
+    price REAL NOT NULL DEFAULT 0,
+    amount INTEGER NOT NULL DEFAULT 0,
+    category TEXT NOT NULL CHECK (category IN ('jeans', 'trousers', 'tops', 'others'))
+  );
+
+  CREATE TABLE IF NOT EXISTS product_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    path TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS cart_items (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    PRIMARY KEY (user_id, product_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS discount_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    type TEXT NOT NULL CHECK (type IN ('percent', 'fixed')),
+    value REAL NOT NULL CHECK (value > 0),
+    min_spend REAL NOT NULL DEFAULT 0,
+    max_uses INTEGER,                -- empty = unlimited
+    used INTEGER NOT NULL DEFAULT 0,
+    expires_on TEXT,                 -- YYYY-MM-DD, empty = no expiry
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- ---------- orders ----------
   CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','in_progress','paid','packed','shipped','delivered','cancelled','returned')),
+      CHECK (status IN ('pending','in_progress','paid','packed','shipped','delivered','cancelled','returned')),
+    subtotal REAL,
+    discount_code TEXT,
+    discount_amount REAL NOT NULL DEFAULT 0,
     total REAL NOT NULL,
     payment_method TEXT,
+    payment_detail TEXT,
+    payment_proof TEXT,              -- file name of the proof picture uploaded with a return
     ship_name TEXT,
     ship_phone TEXT,
     ship_address TEXT,
+    scan_token TEXT UNIQUE,          -- random value inside the QR label
+    cancel_status TEXT,              -- pending / approved / rejected
+    cancel_requested_at TEXT,
+    cancel_reason TEXT,
+    return_status TEXT,              -- pending / approved / rejected
+    return_requested_at TEXT,
+    return_reason TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -90,7 +118,8 @@ db.exec(`
     price REAL NOT NULL,
     qty INTEGER NOT NULL
   );
-  
+
+  -- ---------- customer service chat ----------
   CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -110,6 +139,7 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- ---------- notifications, logs, app state ----------
   CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -133,81 +163,29 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
-  CREATE TABLE IF NOT EXISTS payment_methods (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('GCASH', 'MAYA', 'CARD')),
-    holder_name TEXT NOT NULL,
-    number TEXT NOT NULL,
-    expiry TEXT,
-    is_default INTEGER NOT NULL DEFAULT 0
+  CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS discount_codes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    type TEXT NOT NULL CHECK (type IN ('percent', 'fixed')),
-    value REAL NOT NULL CHECK (value > 0),
-    min_spend REAL NOT NULL DEFAULT 0,
-    max_uses INTEGER,
-    used INTEGER NOT NULL DEFAULT 0,
-    expires_on TEXT,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
+  -- ---------- indexes ----------
   CREATE INDEX IF NOT EXISTS idx_activity_order ON activity_log(order_id);
-
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, id);
-
   CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
 `);
 
-if (!db.prepare("PRAGMA table_info(orders)").all().some(c => c.name === "scan_token")) {
-  db.exec("ALTER TABLE orders ADD COLUMN scan_token TEXT");
-}
-db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_scan_token ON orders(scan_token)");
-
-if (!db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "active")) {
-  db.exec("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
-}
-
-const moreCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
-for (const [name, def] of [["payment_detail", "TEXT"], ["subtotal", "REAL"], ["discount_code", "TEXT"],
-                           ["discount_amount", "REAL NOT NULL DEFAULT 0"], ["payment_proof", "TEXT"]]) {
-  if (!moreCols.includes(name)) db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${def}`);
-}
-
-// cancel / return requests that need admin approval
-const ordCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
-for (const col of ["cancel_status", "cancel_requested_at", "cancel_reason", "return_status",
-                   "return_requested_at", "return_reason"]) {
-  if (!ordCols.includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} TEXT`);
-}
-db.exec("UPDATE orders SET return_status = 'pending' WHERE return_requested_at IS NOT NULL AND return_status IS NULL AND status = 'delivered'");
-
-db.exec("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-
-const orderCols = db.prepare("PRAGMA table_info(orders)").all().map(c => c.name);
-if (!orderCols.includes("return_requested_at")) db.exec("ALTER TABLE orders ADD COLUMN return_requested_at TEXT");
-if (!orderCols.includes("return_reason")) db.exec("ALTER TABLE orders ADD COLUMN return_reason TEXT");
-
-// ---------- USERS ----------
-
-const addUser = db.prepare(
-  "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)"
-);
-
+// ---------- default accounts ----------
+const addUser = db.prepare("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)");
 addUser.run("customer1",  bcrypt.hashSync("cust123", 10),  "customer");
 addUser.run("admin1",     bcrypt.hashSync("admin123", 10), "admin");
 addUser.run("warehouse1", bcrypt.hashSync("ware123", 10),  "warehouse");
 
-// ---------- PRODUCTS ----------
-
+// ---------- default products ----------
 const addProduct = db.prepare(
   "INSERT OR IGNORE INTO products (name, description, price, amount, category) VALUES (?, ?, ?, ?, ?)"
 );
-
 addProduct.run("Sugardoll Baby Tee", "Baby Tee Short-sleeve Crop top", 180, 100, "tops");
 addProduct.run("Zara Slouchy Jeans", "Trendy jeans", 450, 100, "jeans");
 addProduct.run("Sugardoll Lottie Pants", "Unique and Trendy pants", 229, 100, "trousers");
+
+console.log("Database is ready.");
