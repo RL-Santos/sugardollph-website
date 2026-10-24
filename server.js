@@ -292,15 +292,17 @@ app.get("/api/admin/overview", admin, (req, res) => {
 // ----- users -----
 app.get("/api/admin/users", admin, (req, res) => {
   const q = "%" + String(req.query.search || "").trim() + "%";
+  const role = ROLES.includes(req.query.role) ? req.query.role : "";
   res.json(db.prepare(
     `SELECT u.id, u.username, u.role, u.active, p.first_name, p.last_name, p.email,
        (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS orders
      FROM users u LEFT JOIN customer_profiles p ON p.user_id = u.id
-     WHERE u.username LIKE ?
-        OR COALESCE(p.first_name, '') || ' ' || COALESCE(p.last_name, '') LIKE ?
-        OR COALESCE(p.email, '') LIKE ?
+     WHERE (? = '' OR u.role = ?)
+       AND (u.username LIKE ?
+         OR COALESCE(p.first_name, '') || ' ' || COALESCE(p.last_name, '') LIKE ?
+         OR COALESCE(p.email, '') LIKE ?)
      ORDER BY u.username`
-  ).all(q, q, q));
+  ).all(role, role, q, q, q));
 });
 
 app.get("/api/admin/users/:id", admin, (req, res) => {

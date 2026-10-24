@@ -206,9 +206,12 @@ async function viewOverview(box) {
 function viewUsers(box) {
   const search = h("input", { type: "search", placeholder: "Search by username, name or email" });
   const list = h("div");
+  const roleFilter = h("select", {}, h("option", { value: "" }, "All roles"),
+    ROLES.map(r => h("option", { value: r }, label(r))));
 
   async function load() {
-    const rows = await api("GET", "/api/admin/users?search=" + encodeURIComponent(search.value.trim()));
+    const q = new URLSearchParams({ search: search.value.trim(), role: roleFilter.value });
+    const rows = await api("GET", "/api/admin/users?" + q);
     if (rows) list.replaceChildren(table(["Username", "Name", "Email", "Role", "Status", "Orders", "Actions"],
       rows.map(userRow), "No users found."));
   }
@@ -241,8 +244,9 @@ function viewUsers(box) {
   }
 
   search.addEventListener("input", debounce(load));
+  roleFilter.addEventListener("change", load);
   box.append(h("div", { class: "page-head" }, h("h1", {}, "Manage Users")),
-    h("div", { class: "toolbar" }, search), list);
+    h("div", { class: "toolbar" }, search, roleFilter), list);
   load();
 }
 
