@@ -276,7 +276,10 @@ app.get("/api/admin/overview", admin, (req, res) => {
     trending: db.prepare(
       `SELECT oi.name, SUM(oi.qty) AS sold FROM order_items oi JOIN orders o ON o.id = oi.order_id
        WHERE o.status NOT IN ('cancelled','returned') GROUP BY oi.name ORDER BY sold DESC LIMIT 5`).all(),
-    lowStock: db.prepare("SELECT name, amount FROM products WHERE amount <= 5 ORDER BY amount, name LIMIT 8").all(),
+    lowStock: db.prepare(
+      `SELECT p.name, v.color, v.size, v.amount FROM product_variants v JOIN products p ON p.id = v.product_id
+       WHERE v.amount <= 5 ORDER BY v.amount, p.name LIMIT 8`
+    ).all().map(r => ({ name: r.name + (variantLabel(r) ? " (" + variantLabel(r) + ")" : ""), amount: r.amount })),
     recent: db.prepare(
       `SELECT o.id, o.status, o.total, COALESCE(u.username, o.ship_name, 'Deleted account') AS customer
        FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 5`).all(),
@@ -293,16 +296,18 @@ app.get("/api/admin/overview", admin, (req, res) => {
 app.get("/api/admin/users", admin, (req, res) => {
   const q = "%" + String(req.query.search || "").trim() + "%";
   const role = ROLES.includes(req.query.role) ? req.query.role : "";
+  const active = req.query.active === "0" ? 0 : 1;
   res.json(db.prepare(
     `SELECT u.id, u.username, u.role, u.active, p.first_name, p.last_name, p.email,
        (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS orders
      FROM users u LEFT JOIN customer_profiles p ON p.user_id = u.id
-     WHERE (? = '' OR u.role = ?)
+     WHERE u.active = ?
+       AND (? = '' OR u.role = ?)
        AND (u.username LIKE ?
          OR COALESCE(p.first_name, '') || ' ' || COALESCE(p.last_name, '') LIKE ?
          OR COALESCE(p.email, '') LIKE ?)
      ORDER BY u.username`
-  ).all(role, role, q, q, q));
+  ).all(active, role, role, q, q, q));
 });
 
 app.get("/api/admin/users/:id", admin, (req, res) => {
@@ -318,7 +323,7 @@ app.get("/api/admin/users/:id", admin, (req, res) => {
 app.put("/api/admin/users/:id/role", admin, (req, res) => {
   const id = Number(req.params.id);
   const role = String(req.body.role || "");
-  const target = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(id);
+  const target = db.prepare("SELECT id, username, role, active FROM users WHERE id = ?").get(id);
   if (!ROLES.includes(role)) return res.status(400).json({ error: "Unknown role." });
   if (!target) return res.status(404).json({ error: "User not found." });
   if (target.username === req.session.user.username) {
@@ -326,7 +331,8 @@ app.put("/api/admin/users/:id/role", admin, (req, res) => {
   }
   db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
   logActivity(adminIdOf(req), "admin", "user",
-    "Role of " + target.username + " changed: " + target.role + " \u2192 " + role, null, null, "manual");
+    "Role of " + target.username + " changed: " + target.role + " \u2192 " + role,
+    null, null, "manual", target.active ? "active" : "deactivated");
   res.json({ ok: true });
 });
 
@@ -338,46 +344,89 @@ app.put("/api/admin/users/:id/active", admin, (req, res) => {
     return res.status(400).json({ error: "You can't deactivate your own account." });
   }
   const on = req.body.active ? 1 : 0;
+  const busy = on ? 0 : ongoingOrders(id);
+  if (busy) {
+    return res.status(409).json({ error: target.username + " still has " + busy + " order(s) in progress or being returned." });
+  }
   db.prepare("UPDATE users SET active = ? WHERE id = ?").run(on, id);
   logActivity(adminIdOf(req), "admin", "user",
-    "Account " + target.username + (on ? " activated" : " deactivated"), null, null, "manual");
+    "Account " + target.username + (on ? " activated" : " deactivated"),
+    null, null, "manual", on ? "active" : "deactivated");
   res.json({ ok: true });
 });
 
-// ----- products (the list itself comes from the public GET /api/products) -----
 const num = v => String(v ?? "").trim() === "" ? NaN : Number(v);
+const variantLabel = v => [v.color, v.size].filter(Boolean).join(" / ");
+
+function saveVariants(productId, variants) {
+  db.transaction(() => {
+    const keep = new Set(variants.map(v => v.id).filter(Boolean));
+    db.prepare("SELECT id FROM product_variants WHERE product_id = ?").all(productId)
+      .filter(r => !keep.has(r.id))
+      .forEach(r => db.prepare("DELETE FROM product_variants WHERE id = ?").run(r.id));
+    // park the remaining rows on unique placeholders so swapped colors or sizes can't collide
+    db.prepare("UPDATE product_variants SET color = '~' || id, size = '~' WHERE product_id = ?").run(productId);
+    const update = db.prepare("UPDATE product_variants SET color = ?, size = ?, amount = ? WHERE id = ? AND product_id = ?");
+    const add = db.prepare("INSERT INTO product_variants (product_id, color, size, amount) VALUES (?, ?, ?, ?)");
+    variants.forEach(v => {
+      if (!v.id || update.run(v.color, v.size, v.amount, v.id, productId).changes === 0) {
+        add.run(productId, v.color, v.size, v.amount);
+      }
+    });
+  })();
+}
 
 function checkProduct(b, selfId) {
   const p = {
     name: String(b.name || "").trim(), description: String(b.description || "").trim(),
-    price: num(b.price), amount: num(b.amount), category: String(b.category || "")
+    price: num(b.price), category: String(b.category || "")
   };
   if (!p.name || !slugify(p.name)) return { error: "Enter a product name." };
   if (!Number.isFinite(p.price) || p.price < 0) return { error: "Enter a valid price." };
-  if (!Number.isInteger(p.amount) || p.amount < 0) return { error: "Stock must be a whole number, 0 or more." };
   if (!CATEGORIES.includes(p.category)) return { error: "Pick a category." };
   const clash = db.prepare("SELECT id, name FROM products").all()
     .some(r => r.id !== selfId && slugify(r.name) === slugify(p.name));
   if (clash) return { error: "A product with this name already exists." };
-  return { p };
+
+  const list = Array.isArray(b.variants) ? b.variants : [];
+  if (list.length === 0) return { error: "Add at least one variation. Leave color and size empty if the product has none." };
+  if (list.length > 60) return { error: "That's too many variations (60 max)." };
+  const seen = new Set();
+  const variants = [];
+  for (const v of list) {
+    const color = String(v.color || "").trim().slice(0, 30);
+    const size = String(v.size || "").trim().slice(0, 20);
+    const amount = num(v.amount);
+    if (!Number.isInteger(amount) || amount < 0) return { error: "Stock must be a whole number, 0 or more." };
+    const key = (color + "|" + size).toLowerCase();
+    if (seen.has(key)) return { error: "Two variations are the same: " + (variantLabel({ color, size }) || "no color or size") + "." };
+    seen.add(key);
+    variants.push({ id: Number(v.id) || 0, color, size, amount });
+  }
+  return { p, variants };
 }
 
 app.get("/api/admin/products/:id", admin, (req, res) => {
   const p = db.prepare("SELECT * FROM products WHERE id = ?").get(Number(req.params.id));
   if (!p) return res.status(404).json({ error: "Product not found." });
   p.images = db.prepare("SELECT id, path FROM product_images WHERE product_id = ? ORDER BY id").all(p.id);
+  p.variants = db.prepare("SELECT id, color, size, amount FROM product_variants WHERE product_id = ? ORDER BY id").all(p.id);
   res.json(p);
 });
 
 app.post("/api/admin/products", admin, (req, res) => {
   const r = checkProduct(req.body, 0);
   if (r.error) return res.status(400).json({ error: r.error });
-  const info = db.prepare(
-    "INSERT INTO products (name, description, price, amount, category) VALUES (?, ?, ?, ?, ?)"
-  ).run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category);
+  const id = db.transaction(() => {
+    const info = db.prepare("INSERT INTO products (name, description, price, category) VALUES (?, ?, ?, ?)")
+      .run(r.p.name, r.p.description, r.p.price, r.p.category);
+    saveVariants(Number(info.lastInsertRowid), r.variants);
+    return Number(info.lastInsertRowid);
+  })();
   logActivity(adminIdOf(req), "admin", "product",
-    "Added product " + r.p.name + " (PHP " + r.p.price + ", stock " + r.p.amount + ")", null, null, "manual");
-  res.json({ id: Number(info.lastInsertRowid) });
+    "Added product " + r.p.name + " (PHP " + r.p.price + ", " + r.variants.length + " variation(s), stock " +
+    r.variants.reduce((n, v) => n + v.amount, 0) + ")", null, null, "manual");
+  res.json({ id });
 });
 
 app.put("/api/admin/products/:id", admin, (req, res) => {
@@ -386,14 +435,19 @@ app.put("/api/admin/products/:id", admin, (req, res) => {
   if (!old) return res.status(404).json({ error: "Product not found." });
   const r = checkProduct(req.body, id);
   if (r.error) return res.status(400).json({ error: r.error });
-  db.prepare("UPDATE products SET name = ?, description = ?, price = ?, amount = ?, category = ? WHERE id = ?")
-    .run(r.p.name, r.p.description, r.p.price, r.p.amount, r.p.category, id);
-  const changes = ["name", "description", "price", "amount", "category"]
+  const oldVariants = db.prepare("SELECT color, size, amount FROM product_variants WHERE product_id = ?").all(id);
+  db.transaction(() => {
+    db.prepare("UPDATE products SET name = ?, description = ?, price = ?, category = ? WHERE id = ?")
+      .run(r.p.name, r.p.description, r.p.price, r.p.category, id);
+    saveVariants(id, r.variants);
+  })();
+  const changes = ["name", "description", "price", "category"]
     .filter(k => String(old[k]) !== String(r.p[k]))
     .map(k => k === "description" ? "description" : k + ": " + old[k] + " \u2192 " + r.p[k]);
+  const snapshot = list => list.map(v => (variantLabel(v) || "default") + " " + v.amount).sort().join(", ");
+  if (snapshot(oldVariants) !== snapshot(r.variants)) changes.push("variations / stock");
   if (changes.length) {
-    logActivity(adminIdOf(req), "admin", "product",
-      "Edited product " + old.name + " (" + changes.join(", ") + ")", null, null, "manual");
+    logActivity(adminIdOf(req), "admin", "product", "Edited product " + old.name + " (" + changes.join(", ") + ")", null, null, "manual");
   }
   res.json({ id });
 });
@@ -472,7 +526,7 @@ app.put("/api/admin/orders/:id/cancel", admin, (req, res) => {
     db.prepare("UPDATE orders SET status = 'cancelled', cancel_status = CASE WHEN cancel_status = 'pending' THEN 'approved' ELSE cancel_status END WHERE id = ?").run(o.id);
     const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
     db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
-      .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
+      .all(o.id).forEach(i => restockOrder(o.id));
   })();
   notifyOrder(o.id, "cancelled");
   if (o.status !== "pending") notifyWarehouse("Order cancelled", "Order #" + o.id + " was cancelled. Don't ship it.", "/warehouse/orders");
@@ -499,29 +553,39 @@ function slugify(name) {
 app.get("/api/products", (req, res) => {
   const q = String(req.query.search || "").trim();
   const category = String(req.query.category || "");
-  if (category && !CATEGORIES.includes(category)) {
+  const favs = category === "favorites";
+  if (favs && !req.session.user) return res.status(401).json({ error: "Log in to see your favorites." });
+  if (category && !favs && !CATEGORIES.includes(category)) {
     return res.status(400).json({ error: "Unknown category" });
   }
+  const uid = favs ? (cartUserId(req) || -1) : 0;
+  const cat = favs ? "" : category;
   const rows = db.prepare(
-    `SELECT id, name, description, price, amount, category,
+    `SELECT id, name, description, price, category,
+       (SELECT COALESCE(SUM(amount), 0) FROM product_variants WHERE product_id = products.id) AS amount,
        (SELECT path FROM product_images WHERE product_id = products.id ORDER BY id LIMIT 1) AS image
      FROM products
      WHERE name LIKE ? AND (? = '' OR category = ?)
+       AND (? = 0 OR id IN (SELECT product_id FROM favorites WHERE user_id = ?))
      ORDER BY name`
-  ).all("%" + q + "%", category, category);
+  ).all("%" + q + "%", cat, cat, uid, uid);
   res.json(rows.map(r => ({ ...r, slug: slugify(r.name) })));
 });
 
 // One product with all its pictures, found by its link name
 app.get("/api/products/:slug", (req, res) => {
   const slug = req.params.slug.toLowerCase();
+  const uid = req.session.user ? cartUserId(req) : null;
   const p = db.prepare(
-    "SELECT id, name, description, price, amount, category FROM products ORDER BY name"
+    "SELECT id, name, description, price, category FROM products ORDER BY name"
   ).all().find(r => slugify(r.name) === slug);
   if (!p) return res.status(404).json({ error: "Product not found" });
   p.slug = slugify(p.name);
   p.images = db.prepare("SELECT path FROM product_images WHERE product_id = ? ORDER BY id")
     .all(p.id).map(r => r.path);
+  p.variants = db.prepare("SELECT id, color, size, amount FROM product_variants WHERE product_id = ? ORDER BY id").all(p.id);
+  p.amount = p.variants.reduce((n, v) => n + v.amount, 0);
+  p.favorite = !!(uid && db.prepare("SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ?").get(uid, p.id));
   res.json(p);
 });
 
@@ -533,61 +597,62 @@ function cartUserId(req) {
 // Reads the cart. Items that went out of stock are dropped, and quantities above the stock are lowered.
 function readCart(uid) {
   db.prepare(
-    "DELETE FROM cart_items WHERE user_id = ? AND product_id IN (SELECT id FROM products WHERE amount <= 0)"
+    "DELETE FROM cart_items WHERE user_id = ? AND variant_id IN (SELECT id FROM product_variants WHERE amount <= 0)"
   ).run(uid);
   db.prepare(
     `UPDATE cart_items
-     SET qty = (SELECT amount FROM products WHERE products.id = cart_items.product_id)
+     SET qty = (SELECT amount FROM product_variants v WHERE v.id = cart_items.variant_id)
      WHERE user_id = ?
-       AND qty > (SELECT amount FROM products WHERE products.id = cart_items.product_id)`
+       AND qty > (SELECT amount FROM product_variants v WHERE v.id = cart_items.variant_id)`
   ).run(uid);
   return db.prepare(
-    `SELECT p.id, p.name, p.price, p.amount AS max, c.qty,
+    `SELECT v.id, p.id AS product_id, p.name, v.color, v.size, p.price, v.amount AS max, c.qty,
        (SELECT path FROM product_images WHERE product_id = p.id ORDER BY id LIMIT 1) AS image
-     FROM cart_items c JOIN products p ON p.id = c.product_id
+     FROM cart_items c
+     JOIN product_variants v ON v.id = c.variant_id
+     JOIN products p ON p.id = v.product_id
      WHERE c.user_id = ?
-     ORDER BY p.name`
-  ).all(uid);
+     ORDER BY p.name, v.color, v.size`
+  ).all(uid).map(i => ({ ...i, label: variantLabel(i) }));
 }
+
+// Set the quantity of one variation in the cart (0 or less removes it)
+app.put("/api/cart/:variantId", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const uid = cartUserId(req);
+  if (!uid) return res.status(401).json({ error: "Not logged in" });
+
+  const variantId = Number(req.params.variantId);
+  const qty = Number(req.body.qty);
+  if (!Number.isInteger(qty)) return res.status(400).json({ error: "Invalid quantity" });
+
+  const v = db.prepare("SELECT id, amount FROM product_variants WHERE id = ?").get(variantId);
+  if (!v) return res.status(404).json({ error: "Product not found" });
+
+  if (qty <= 0) {
+    db.prepare("DELETE FROM cart_items WHERE user_id = ? AND variant_id = ?").run(uid, variantId);
+  } else {
+    if (v.amount <= 0) return res.status(400).json({ error: "Out of stock" });
+    db.prepare(
+      `INSERT INTO cart_items (user_id, variant_id, qty) VALUES (?, ?, ?)
+       ON CONFLICT(user_id, variant_id) DO UPDATE SET qty = excluded.qty`
+    ).run(uid, variantId, Math.min(qty, v.amount));
+  }
+  res.json(readCart(uid));
+});
+
+app.delete("/api/cart/:variantId", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  const uid = cartUserId(req);
+  if (!uid) return res.status(401).json({ error: "Not logged in" });
+  db.prepare("DELETE FROM cart_items WHERE user_id = ? AND variant_id = ?").run(uid, Number(req.params.variantId));
+  res.json(readCart(uid));
+});
 
 app.get("/api/cart", (req, res) => {
   if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
   const uid = cartUserId(req);
   if (!uid) return res.status(401).json({ error: "Not logged in" });
-  res.json(readCart(uid));
-});
-
-// Set the quantity of one product in the cart (0 or less removes it)
-app.put("/api/cart/:productId", (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
-  const uid = cartUserId(req);
-  if (!uid) return res.status(401).json({ error: "Not logged in" });
-
-  const productId = Number(req.params.productId);
-  const qty = Number(req.body.qty);
-  if (!Number.isInteger(qty)) return res.status(400).json({ error: "Invalid quantity" });
-
-  const product = db.prepare("SELECT id, amount FROM products WHERE id = ?").get(productId);
-  if (!product) return res.status(404).json({ error: "Product not found" });
-
-  if (qty <= 0) {
-    db.prepare("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?").run(uid, productId);
-  } else {
-    if (product.amount <= 0) return res.status(400).json({ error: "Out of stock" });
-    db.prepare(
-      `INSERT INTO cart_items (user_id, product_id, qty) VALUES (?, ?, ?)
-       ON CONFLICT(user_id, product_id) DO UPDATE SET qty = excluded.qty`
-    ).run(uid, productId, Math.min(qty, product.amount));
-  }
-  res.json(readCart(uid));
-});
-
-app.delete("/api/cart/:productId", (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
-  const uid = cartUserId(req);
-  if (!uid) return res.status(401).json({ error: "Not logged in" });
-  db.prepare("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?")
-    .run(uid, Number(req.params.productId));
   res.json(readCart(uid));
 });
 
@@ -599,6 +664,18 @@ function requireLogin(req, res, next) {
   req.uid = row.id;
   next();
 }
+
+app.put("/api/favorites/:productId", requireLogin, (req, res) => {
+  const id = Number(req.params.productId);
+  if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) return res.status(404).json({ error: "Product not found." });
+  db.prepare("INSERT OR IGNORE INTO favorites (user_id, product_id) VALUES (?, ?)").run(req.uid, id);
+  res.json({ ok: true });
+});
+
+app.delete("/api/favorites/:productId", requireLogin, (req, res) => {
+  db.prepare("DELETE FROM favorites WHERE user_id = ? AND product_id = ?").run(req.uid, Number(req.params.productId));
+  res.json({ ok: true });
+});
 
 // Makes sure the account has a profile row
 function ensureProfile(uid) {
@@ -669,26 +746,27 @@ app.put("/api/password", requireLogin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/api/account", requireLogin, (req, res) => {
+function ongoingOrders(uid) {
+  return db.prepare(
+    `SELECT COUNT(*) AS n FROM orders WHERE user_id = ?
+       AND (status IN ('pending','in_progress','paid','packed','shipped')
+            OR (status = 'delivered' AND return_status IN ('pending','approved')))`
+  ).get(uid).n;
+}
+
+app.put("/api/account/deactivate", requireLogin, (req, res) => {
   if (req.session.user.role !== "customer") {
-    return res.status(403).json({ error: "Only customer accounts can be deleted here." });
+    return res.status(403).json({ error: "Only customer accounts can be deactivated here." });
   }
   const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(req.uid);
   if (!bcrypt.compareSync(String(req.body.password || ""), user.password_hash)) {
     return res.status(400).json({ error: "Wrong password." });
   }
-  const active = db.prepare(
-    "SELECT 1 FROM orders WHERE user_id = ? AND status IN ('pending','in_progress','paid','packed','shipped')"
-  ).get(req.uid);
-  if (active) return res.status(400).json({ error: "You still have an order in progress." });
+  if (ongoingOrders(req.uid)) return res.status(400).json({ error: "You still have an order in progress." });
 
-  db.transaction(() => {
-    db.prepare("UPDATE orders SET user_id = NULL WHERE user_id = ?").run(req.uid);
-    db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
-    db.prepare("DELETE FROM addresses WHERE user_id = ?").run(req.uid);
-    db.prepare("DELETE FROM customer_profiles WHERE user_id = ?").run(req.uid);
-    db.prepare("DELETE FROM users WHERE id = ?").run(req.uid);
-  })();
+  db.prepare("UPDATE users SET active = 0 WHERE id = ?").run(req.uid);
+  logActivity(req.uid, "customer", "user",
+    "Account " + req.session.user.username + " deactivated by the customer", null, null, "customer", "deactivated");
   req.session.destroy(() => res.json({ ok: true }));
 });
 
@@ -832,20 +910,24 @@ app.post("/api/checkout", requireLogin, (req, res) => {
   const total = Math.round((subtotal - discount) * 100) / 100;
   const shipAddress = [addr.street, addr.barangay, addr.city, addr.province, addr.postal_code].filter(Boolean).join(", ");
 
+  // Only cash on delivery waits for an admin. Online payments go straight to the warehouse.
+  const status = method === "COD" ? "pending" : "in_progress";
+
   try {
     const orderId = db.transaction(() => {
       const info = db.prepare(
         `INSERT INTO orders (user_id, status, total, subtotal, discount_code, discount_amount,
            payment_method, payment_detail, ship_name, ship_phone, ship_address)
-         VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(req.uid, total, subtotal, disc.none ? null : disc.d.code, discount,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(req.uid, status, total, subtotal, disc.none ? null : disc.d.code, discount,
             method, detail, addr.recipient_name, addr.phone, shipAddress);
+      const id = Number(info.lastInsertRowid);
       const addItem = db.prepare(
-        "INSERT INTO order_items (order_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)");
-      const takeStock = db.prepare("UPDATE products SET amount = amount - ? WHERE id = ? AND amount >= ?");
+        "INSERT INTO order_items (order_id, product_id, variant_id, name, price, qty) VALUES (?, ?, ?, ?, ?, ?)");
+      const takeStock = db.prepare("UPDATE product_variants SET amount = amount - ? WHERE id = ? AND amount >= ?");
       cart.forEach(i => {
         if (takeStock.run(i.qty, i.id, i.qty).changes === 0) throw new Error("out of stock");
-        addItem.run(info.lastInsertRowid, i.id, i.name, i.price, i.qty);
+        addItem.run(id, i.product_id, i.id, i.label ? i.name + " (" + i.label + ")" : i.name, i.price, i.qty);
       });
       if (!disc.none && db.prepare(
           "UPDATE discount_codes SET used = used + 1 WHERE id = ? AND (max_uses IS NULL OR used < max_uses)"
@@ -853,11 +935,23 @@ app.post("/api/checkout", requireLogin, (req, res) => {
         throw new Error("code used up");
       }
       db.prepare("DELETE FROM cart_items WHERE user_id = ?").run(req.uid);
-      return Number(info.lastInsertRowid);
+      if (status === "in_progress") {
+        db.prepare(
+          `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary)
+           VALUES (NULL, 'System', 'system', 'order', ?, 'in_progress', 'auto', ?)`
+        ).run(id, "Order #" + id + " accepted automatically (online payment)");
+      }
+      return id;
     })();
-    notifyOrder(orderId, "pending");
-    notifyAdmins("New order", "Order #" + orderId + " is waiting for approval.", "/admin/orders/" + orderId);
-    res.json({ orderId });
+
+    notifyOrder(orderId, status);
+    if (status === "pending") {
+      notifyAdmins("New order", "Order #" + orderId + " is waiting for approval.", "/admin/orders/" + orderId);
+    } else {
+      notifyAdmins("New paid order", "Order #" + orderId + " was paid online and sent to the warehouse.", "/admin/orders/" + orderId);
+      notifyWarehouse("New order to pack", "Order #" + orderId + " is ready to pack.", "/warehouse/orders");
+    }
+    res.json({ orderId, status });
   } catch (e) {
     res.status(400).json({ error: e.message === "code used up"
       ? "That code was just fully used."
@@ -1144,7 +1238,6 @@ app.post("/api/chats", requireCustomer, (req, res) => {
     notifyAdmins("New chat", req.session.user.username + " needs help: " + CHAT_TOPICS[topic], "/admin/chats/" + id);
   }
   res.json({ id });
-  res.json({ id });
 });
 
 app.get("/api/chats/:id/messages", requireCustomer, (req, res) => {
@@ -1168,9 +1261,13 @@ app.post("/api/chats/:id/messages", requireCustomer, (req, res) => {
 });
 
 app.put("/api/chats/:id/close", requireCustomer, (req, res) => {
-  const chat = db.prepare("SELECT id, status FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
+  const chat = db.prepare("SELECT id, status, topic FROM chats WHERE id = ? AND user_id = ?").get(Number(req.params.id), req.uid);
   if (!chat) return res.status(404).json({ error: "Chat not found." });
-  if (chat.status === "open") endChat(chat.id, "The customer ended this chat.");
+  if (chat.status === "open") {
+    endChat(chat.id, "The customer ended this chat.");
+    logActivity(req.uid, "customer", "chat",
+      "Chat #" + chat.id + " closed by the customer (" + CHAT_TOPICS[chat.topic] + ")", null, null, "customer");
+  }
   res.json({ ok: true });
 });
 
@@ -1197,7 +1294,8 @@ app.put("/api/admin/chats/:id/claim", admin, (req, res) => {
     const info = db.prepare("UPDATE chats SET admin_id = ? WHERE id = ? AND status = 'open' AND admin_id IS NULL").run(me, id);
     if (info.changes === 0) return false;
     addMessage(id, "system", null, agentName(me) + " has joined the chat and will assist you.");
-    const c = chatInfo(id);   // <-- added
+    const c = chatInfo(id);
+    logActivity(me, "admin", "chat", "Chat #" + id + " claimed (" + CHAT_TOPICS[c.topic] + ")", null, null, "manual");
     notify(c.user_id, "Customer service", agentName(me) + " joined your chat: " + CHAT_TOPICS[c.topic] + ".", "chat:" + id);   // <-- added
     return true;
   })();
@@ -1213,7 +1311,8 @@ app.put("/api/admin/chats/:id/release", admin, (req, res) => {
     const info = db.prepare("UPDATE chats SET admin_id = NULL WHERE id = ? AND status = 'open' AND admin_id = ?").run(id, me);
     if (info.changes === 0) return false;
     addMessage(id, "system", null, agentName(me) + " has left the chat. Please wait while another agent takes over.");
-    const c = chatInfo(id);   // <-- added
+    const c = chatInfo(id);
+    logActivity(me, "admin", "chat", "Chat #" + id + " unclaimed (" + CHAT_TOPICS[c.topic] + ")", null, null, "manual");
     notify(c.user_id, "Customer service", agentName(me) + " left your chat. Another agent will take over soon.", "chat:" + id);   // <-- added
     notifyAdmins("Chat needs an agent", "A chat about \"" + CHAT_TOPICS[c.topic] + "\" is unclaimed again.", "/admin/chats/" + id, me);   // <-- added
     return true;
@@ -1241,6 +1340,7 @@ app.put("/api/admin/chats/:id/close", admin, (req, res) => {
   if (chat.status !== "open" || chat.admin_id !== me) return res.status(409).json({ error: "You can only close a chat you've claimed." });
   endChat(chat.id, agentName(me) + " closed this chat.");
   const c = chatInfo(chat.id);
+  logActivity(me, "admin", "chat", "Chat #" + chat.id + " closed (" + CHAT_TOPICS[c.topic] + ")", null, null, "manual");
   notify(c.user_id, "Customer service", agentName(me) + " closed your chat: " + CHAT_TOPICS[c.topic] + ".", "chat:" + chat.id);
   res.json({ ok: true });
 });
@@ -1318,7 +1418,7 @@ const WH_FLOW = {
   packed: ["in_progress"],
   shipped: ["packed"],
   delivered: ["shipped"],
-  returned: ["shipped", "delivered"]
+  returned: ["delivered"]
 };
 
 function requireWarehouse(req, res, next) {
@@ -1328,11 +1428,11 @@ function requireWarehouse(req, res, next) {
   });
 }
 
-function logActivity(userId, role, type, summary, orderId, toStatus, method) {
+function logActivity(userId, role, type, summary, orderId, toStatus, method, targetStatus) {
   db.prepare(
-    `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(userId, agentName(userId), role, type, orderId || null, toStatus || null, method || null, summary);
+    `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary, target_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(userId, agentName(userId), role, type, orderId || null, toStatus || null, method || null, summary, targetStatus || null);
 }
 
 // Moves an order to `status` for a warehouse user
@@ -1370,11 +1470,7 @@ function whMove(orderId, status, uid, method) {
     const info = db.prepare(`UPDATE orders SET status = ? WHERE id = ? AND status IN (${from.map(() => "?").join(",")})`)
       .run(status, o.id, ...from);
     if (info.changes === 0) return false;
-    if (status === "returned") { // returned parcels go back on the shelf
-      const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
-      db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
-        .all(o.id).forEach(i => restock.run(i.qty, i.product_id));
-    }
+    if (status === "returned") restockOrder(o.id); // returned parcels go back on the shelf
     logActivity(uid, "warehouse", "order",
       "Order #" + o.id + " marked " + status + (status === "returned" ? " (items returned to stock)" : ""),
       o.id, status, method);
@@ -1418,21 +1514,35 @@ app.get("/api/warehouse/orders", requireWarehouse, (req, res) => {
   ).all(...(returning ? [] : [status]), q, q).map(o => ({ ...o, items: items.all(o.id) })));
 });
 
+app.get("/api/warehouse/stock", requireWarehouse, (req, res) => {
+  const q = "%" + String(req.query.search || "").trim() + "%";
+  res.json(db.prepare(
+    `SELECT v.id, p.name, v.color, v.size, v.amount,
+       (SELECT path FROM product_images WHERE product_id = p.id ORDER BY id LIMIT 1) AS image
+     FROM product_variants v JOIN products p ON p.id = v.product_id
+     WHERE p.name LIKE ? ORDER BY p.name, v.color, v.size`
+  ).all(q).map(r => ({ ...r, label: variantLabel(r) })));
+});
+
 app.put("/api/warehouse/stock/:id", requireWarehouse, (req, res) => {
-  const p = db.prepare("SELECT id, name, amount FROM products WHERE id = ?").get(Number(req.params.id));
-  if (!p) return res.status(404).json({ error: "Product not found." });
+  const v = db.prepare(
+    `SELECT v.id, v.color, v.size, v.amount, p.name FROM product_variants v
+     JOIN products p ON p.id = v.product_id WHERE v.id = ?`
+  ).get(Number(req.params.id));
+  if (!v) return res.status(404).json({ error: "Product not found." });
   const mode = req.body.mode === "set" ? "set" : "add";
   const n = Number(req.body.qty);
   if (!Number.isInteger(n) || n < (mode === "add" ? 1 : 0) || n > 100000) {
     return res.status(400).json({ error: mode === "add" ? "Enter a whole number of 1 or more." : "Enter a whole number, 0 or more." });
   }
   const reason = String(req.body.reason || "").trim().slice(0, 60) || (mode === "add" ? "Incoming stock" : "Recount");
-  const next = mode === "add" ? p.amount + n : n;
+  const next = mode === "add" ? v.amount + n : n;
+  const title = v.name + (variantLabel(v) ? " (" + variantLabel(v) + ")" : "");
   db.transaction(() => {
-    db.prepare("UPDATE products SET amount = ? WHERE id = ?").run(next, p.id);
-    logActivity(req.uid, "warehouse", "stock", p.name + ": " + p.amount + " \u2192 " + next + " (" + reason + ")", null, null, mode);
+    db.prepare("UPDATE product_variants SET amount = ? WHERE id = ?").run(next, v.id);
+    logActivity(req.uid, "warehouse", "stock", title + ": " + v.amount + " \u2192 " + next + " (" + reason + ")", null, null, mode);
   })();
-  res.json({ id: p.id, amount: next });
+  res.json({ id: v.id, amount: next });
 });
 
 app.get("/api/warehouse/activity", requireWarehouse, (req, res) => {
@@ -1443,10 +1553,10 @@ app.get("/api/warehouse/activity", requireWarehouse, (req, res) => {
 
 // ----- admin logs + QR label -----
 app.get("/api/admin/logs", admin, (req, res) => {
-  const type = ["order", "stock", "user", "product"].includes(req.query.type) ? req.query.type : "";
+  const type = ["order", "stock", "user", "product", "chat"].includes(req.query.type) ? req.query.type : "";
   const q = "%" + String(req.query.search || "").trim().replace(/^#/, "") + "%";
   res.json(db.prepare(
-    `SELECT id, actor, role, type, order_id, method, summary, created_at FROM activity_log
+    `SELECT id, actor, role, type, order_id, method, target_status, summary, created_at FROM activity_log
      WHERE (? = '' OR type = ?)
        AND (actor LIKE ? OR summary LIKE ? OR CAST(COALESCE(order_id, '') AS TEXT) LIKE ?)
      ORDER BY id DESC LIMIT 200`
@@ -1466,9 +1576,9 @@ app.get("/api/admin/orders/:id/qr", admin, async (req, res) => {
 });
 
 function restockOrder(orderId) {
-  const restock = db.prepare("UPDATE products SET amount = amount + ? WHERE id = ?");
-  db.prepare("SELECT product_id, qty FROM order_items WHERE order_id = ? AND product_id IS NOT NULL")
-    .all(orderId).forEach(i => restock.run(i.qty, i.product_id));
+  const restock = db.prepare("UPDATE product_variants SET amount = amount + ? WHERE id = ?");
+  db.prepare("SELECT variant_id, qty FROM order_items WHERE order_id = ? AND variant_id IS NOT NULL")
+    .all(orderId).forEach(i => restock.run(i.qty, i.variant_id));
 }
 
 // Admin approves or rejects a customer's cancellation or return request
@@ -1513,6 +1623,7 @@ const SHOP_TZ = "Asia/Manila";
 const TZ_OFFSET = "+8 hours";   // Manila UTC+8
 const CHAT_KEEP_DAYS = 14;
 const ORDER_STALE_DAYS = 7;
+const AUTO_RECEIVE_DAYS = 7;
 
 const today = () => process.env.DEMO_DATE || new Date().toLocaleDateString("en-CA", { timeZone: SHOP_TZ });
 
@@ -1551,6 +1662,28 @@ function cancelStaleOrders(day) {
     })();
     notify(o.user_id, "Order cancelled", "Order #" + o.id + " was automatically cancelled because it wasn't processed within " + ORDER_STALE_DAYS + " days.", "/purchases/returns");
     notifyAdmins("Order auto-cancelled", summary + ".", "/admin/orders/" + o.id);
+  });
+}
+// Mark orders as delivered after 7 days
+function autoReceiveOrders(day) {
+  const due = db.prepare(
+    `SELECT o.id FROM orders o
+     WHERE o.status = 'shipped'
+       AND date(COALESCE((SELECT MAX(created_at) FROM activity_log WHERE order_id = o.id AND to_status = 'shipped'), o.created_at), ?)
+           <= date(?, ?)`
+  ).all(TZ_OFFSET, day, "-" + AUTO_RECEIVE_DAYS + " days");
+
+  due.forEach(o => {
+    const summary = "Order #" + o.id + " auto-marked delivered: not confirmed within " + AUTO_RECEIVE_DAYS + " days of shipping";
+    const moved = db.transaction(() => {
+      if (db.prepare("UPDATE orders SET status = 'delivered' WHERE id = ? AND status = 'shipped'").run(o.id).changes === 0) return false;
+      db.prepare(
+        `INSERT INTO activity_log (user_id, actor, role, type, order_id, to_status, method, summary)
+         VALUES (NULL, 'System', 'system', 'order', ?, 'delivered', 'auto', ?)`
+      ).run(o.id, summary);
+      return true;
+    })();
+    if (moved) notifyOrder(o.id, "delivered");
   });
 }
 
@@ -1612,6 +1745,7 @@ function runDailyJobs() {
   if (last && last.value === day) return;
   purgeOldChats(day);
   cancelStaleOrders(day);
+  autoReceiveOrders(day);
   db.prepare("INSERT INTO app_state (key, value) VALUES ('last_cleanup', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(day);
   console.log("Daily clean-up done for " + day);
 }

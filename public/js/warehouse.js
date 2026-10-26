@@ -242,7 +242,7 @@ function viewStock(box) {
   const list = h("div");
 
   async function load() {
-    let rows = await api("GET", "/api/products?search=" + encodeURIComponent(search.value.trim()));
+    let rows = await api("GET", "/api/warehouse/stock?search=" + encodeURIComponent(search.value.trim()));
     if (!rows) return;
     if (filter.value === "low") rows = rows.filter(p => p.amount <= 5);
     list.replaceChildren(table(["", "Product", "Stock", "Qty", "Note", "Actions"],
@@ -250,12 +250,13 @@ function viewStock(box) {
   }
 
   function row(p) {
+    const title = p.name + (p.label ? " (" + p.label + ")" : "");
     const qty = h("input", { type: "number", min: "0", step: "1", placeholder: "Qty" });
     const note = h("input", { type: "text", maxlength: "60", placeholder: "Note (optional)" });
     const apply = async mode => {
       const n = Number(qty.value);
       if (qty.value === "" || !Number.isInteger(n)) return toast("Enter a whole number.", "error");
-      if (mode === "set" && !(await confirmAction(`Set "${p.name}" to ${n}? It shows ${p.amount} now.`, "Set count"))) return;
+      if (mode === "set" && !(await confirmAction(`Set "${title}" to ${n}? It shows ${p.amount} now`, "Set count"))) return;
       if (await api("PUT", "/api/warehouse/stock/" + p.id, { mode, qty: n, reason: note.value })) {
         toast("Stock updated.", "success");
         load();
@@ -263,7 +264,7 @@ function viewStock(box) {
     };
     return tr(
       p.image ? h("img", { class: "thumb", src: p.image, alt: "" }) : h("div", { class: "thumb" }),
-      h("b", {}, p.name),
+      h("b", {}, title),
       p.amount + (p.amount <= 5 ? " \u00b7 LOW" : ""),
       qty, note,
       actionsCell([

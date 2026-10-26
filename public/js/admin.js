@@ -208,9 +208,12 @@ function viewUsers(box) {
   const list = h("div");
   const roleFilter = h("select", {}, h("option", { value: "" }, "All roles"),
     ROLES.map(r => h("option", { value: r }, label(r))));
+  const statusFilter = h("select", {},
+    h("option", { value: "1" }, "Activated"),
+    h("option", { value: "0" }, "Deactivated (archive)"));
 
   async function load() {
-    const q = new URLSearchParams({ search: search.value.trim(), role: roleFilter.value });
+    const q = new URLSearchParams({ search: search.value.trim(), role: roleFilter.value, active: statusFilter.value });
     const rows = await api("GET", "/api/admin/users?" + q);
     if (rows) list.replaceChildren(table(["Username", "Name", "Email", "Role", "Status", "Orders", "Actions"],
       rows.map(userRow), "No users found."));
@@ -245,8 +248,9 @@ function viewUsers(box) {
 
   search.addEventListener("input", debounce(load));
   roleFilter.addEventListener("change", load);
+  statusFilter.addEventListener("change", load);
   box.append(h("div", { class: "page-head" }, h("h1", {}, "Manage Users")),
-    h("div", { class: "toolbar" }, search, roleFilter), list);
+    h("div", { class: "toolbar" }, search, roleFilter, statusFilter), list);
   load();
 }
 
@@ -440,23 +444,38 @@ function viewProducts(box) {
   cat.addEventListener("change", load);
   box.replaceChildren(
     h("div", { class: "page-head" }, h("h1", {}, "Manage Products"),
-      h("button", { class: "primary-btn", onclick: () => productForm(box, null) }, "+ Add product")),
+      h("button", { class: "primary-btn", onclick: () => productForm(box, null) }, "+ Add new product")),
     h("div", { class: "toolbar" }, search, cat), list);
   load();
 }
 
 // One form for adding (id is null) and editing
 async function productForm(box, id) {
-  let p = { name: "", description: "", price: "", amount: "", category: "tops", images: [] };
+  let p = { name: "", description: "", price: "", category: "tops", images: [], variants: [] };
   if (id) { p = await api("GET", "/api/admin/products/" + id); if (!p) return; }
 
   const name = h("input", { type: "text", value: p.name });
   const desc = h("textarea", {}, p.description);
   const price = h("input", { type: "number", min: "0", step: "0.01", value: p.price });
-  const amount = h("input", { type: "number", min: "0", step: "1", value: p.amount });
   const cat = h("select", {}, CATEGORIES.map(c => h("option", { value: c, selected: c === p.category }, label(c))));
   const files = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", multiple: true });
   const field = (text, input) => h("label", { class: "field" }, text, input);
+
+  // Variations: one row per color + size that is available, each with its own stock
+  const rows = h("div", { class: "variants" });
+  const sizes = h("datalist", { id: "size-list" },
+    ["XS", "S", "M", "L", "XL", "XXL", "Free size"].map(s => h("option", { value: s })));
+  const blank = () => ({ color: "", size: "", amount: "" });
+  function variantRow(v) {
+    const color = h("input", { type: "text", maxlength: "30", placeholder: "Color", value: v.color });
+    const size = h("input", { type: "text", maxlength: "20", placeholder: "Size", value: v.size, list: "size-list" });
+    const stock = h("input", { type: "number", min: "0", step: "1", placeholder: "Stock", value: v.amount });
+    const row = h("div", { class: "variant-edit" }, color, size, stock,
+      h("button", { class: "secondary-btn", onclick: () => row.remove() }, "Remove"));
+    row.read = () => ({ id: v.id || 0, color: color.value, size: size.value, amount: stock.value });
+    return row;
+  }
+  (p.variants.length ? p.variants : [blank()]).forEach(v => rows.append(variantRow(v)));
 
   const gallery = h("div", {}, p.images.map(img => {
     const item = h("div", { class: "img-item" },
@@ -469,7 +488,8 @@ async function productForm(box, id) {
   }));
 
   async function save() {
-    const body = { name: name.value, description: desc.value, price: price.value, amount: amount.value, category: cat.value };
+    const body = { name: name.value, description: desc.value, price: price.value, category: cat.value,
+      variants: [...rows.children].map(r => r.read()) };
     const saved = await api(id ? "PUT" : "POST", "/api/admin/products" + (id ? "/" + id : ""), body);
     if (!saved) return;
     if (files.files.length) {
@@ -484,8 +504,13 @@ async function productForm(box, id) {
   box.replaceChildren(
     h("div", { class: "page-head" }, h("h1", {}, id ? "Edit product" : "Add product")),
     h("div", { class: "form" },
-      field("Name", name), field("Description", desc), field("Price (PHP)", price),
-      field("Stock", amount), field("Category", cat),
+      field("Name", name), field("Description", desc),
+      field("Price (PHP, same for every variation)", price), field("Category", cat),
+      h("div", {},
+        h("p", {}, h("b", {}, "Variations")),
+        h("p", { class: "chat-note" }, "Add each color and size that is available. Stock is counted per variation. Leave color and size empty if the product has none."),
+        rows, sizes,
+        h("button", { class: "secondary-btn", onclick: () => rows.append(variantRow(blank())) }, "+ Add variation")),
       id ? h("div", {}, h("p", {}, h("b", {}, "Pictures")), gallery) : "",
       field(id ? "Add more pictures (JPG, PNG or WEBP, 5 MB max each)" : "Pictures (optional)", files),
       h("div", { class: "row-actions" },
@@ -668,17 +693,21 @@ function viewDiscounts(box) {
 function viewLogs(box) {
   const type = h("select", {}, h("option", { value: "" }, "All activity"),
     h("option", { value: "order" }, "Order updates"), h("option", { value: "stock" }, "Stock changes"),
-    h("option", { value: "product" }, "Product edits"), h("option", { value: "user" }, "User edits"));
+    h("option", { value: "product" }, "Product edits"), h("option", { value: "user" }, "User edits"),
+    h("option", { value: "chat" }, "Chat actions"));
   const search = h("input", { type: "search", placeholder: "Search by person, order # or product" });
   const list = h("div");
 
   async function load() {
     const q = new URLSearchParams({ type: type.value, search: search.value.trim() });
     const rows = await api("GET", "/api/admin/logs?" + q);
-    if (rows) list.replaceChildren(table(["Time", "Who", "Role", "Type", "Activity", "Order"],
+    if (rows) list.replaceChildren(table(["Time", "Who", "Role", "Type", "Activity", "Account status", "Order"],
       rows.map(l => tr(null, when(l.created_at), h("b", {}, l.actor), l.role,
         h("span", { class: "badge " + l.type }, label(l.type)),
         l.summary + (l.method ? " (" + l.method + ")" : ""),
+        l.target_status
+          ? h("span", { class: "badge " + (l.target_status === "active" ? "delivered" : "cancelled") }, label(l.target_status))
+          : "\u2014",
         l.order_id ? h("a", { href: "/admin/orders/" + l.order_id, "data-nav": "" }, "#" + l.order_id) : "")),
       "No activity yet."));
   }

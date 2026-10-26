@@ -48,6 +48,8 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #3A2D28; }
   color: #3A2D28;
   text-decoration: underline;
 }
+#fav-btn { padding: 12px 16px; }
+#fav-btn.on { background: #EFD7CC; }
 
 /* ---------- Login + create account (split screen) ---------- */
 .split { display: flex; height: 100vh; overflow: hidden; }
@@ -575,3 +577,27 @@ body.shop { margin: 0; font-family: system-ui, sans-serif; color: #3A2D28; }
 .track-row.latest span { font-weight: 600; }
 .track-row small { color: #988780; }
 .track-row:last-child { padding-bottom: 0; border-left-color: transparent; }
+
+/* ---------- Variations (color / size) ---------- */
+#variant-box { display: flex; flex-direction: column; gap: 12px; }
+.variant-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.variant-row b { min-width: 52px; }
+.variant-chip { padding: 8px 14px; border: 1px solid #CBAD8D; border-radius: 999px; background: #F1EDE6; color: #3A2D28; }
+.variant-chip:hover { background: #F1E7DD; }
+.variant-chip.on { border-color: #3A2D28; background: #3A2D28; color: #F1EDE6; }
+.variant-chip.off { color: #988780; text-decoration: line-through; }
+
+/* ---------- Shop main page background ---------- */
+:root {
+  --shop-bg-image: url(/images/shop-bg.jpg);
+  --shop-bg-opacity: 0.15;
+}
+body.shop-home::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: var(--shop-bg-image) center / cover no-repeat;
+  opacity: var(--shop-bg-opacity);
+  pointer-events: none;
+}

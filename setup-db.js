@@ -3,6 +3,12 @@ const bcrypt = require("bcrypt");
 
 const db = new Database("shop.db");
 
+const upgrading = !db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'product_variants'").get();
+
+if (db.prepare("PRAGMA table_info(cart_items)").all().some(c => c.name === "product_id")) {
+  db.exec("DROP TABLE cart_items");
+}
+
 db.exec(`
   -- ---------- accounts ----------
   CREATE TABLE IF NOT EXISTS users (
@@ -54,8 +60,16 @@ db.exec(`
     name TEXT UNIQUE NOT NULL,
     description TEXT NOT NULL,
     price REAL NOT NULL DEFAULT 0,
-    amount INTEGER NOT NULL DEFAULT 0,
     category TEXT NOT NULL CHECK (category IN ('jeans', 'trousers', 'tops', 'others'))
+  );
+
+  CREATE TABLE IF NOT EXISTS product_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    color TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+    size TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+    amount INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (product_id, color, size)
   );
 
   CREATE TABLE IF NOT EXISTS product_images (
@@ -66,8 +80,14 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS cart_items (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    variant_id INTEGER NOT NULL REFERENCES product_variants(id) ON DELETE CASCADE,
     qty INTEGER NOT NULL CHECK (qty > 0),
+    PRIMARY KEY (user_id, variant_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS favorites (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     PRIMARY KEY (user_id, product_id)
   );
 
@@ -114,6 +134,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    variant_id INTEGER REFERENCES product_variants(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
     price REAL NOT NULL,
     qty INTEGER NOT NULL
@@ -155,10 +176,11 @@ db.exec(`
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     actor TEXT NOT NULL,
     role TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('order', 'stock', 'user', 'product')),
+    type TEXT NOT NULL CHECK (type IN ('order', 'stock', 'user', 'product', 'chat')),
     order_id INTEGER,
     to_status TEXT,
     method TEXT,
+    target_status TEXT, 
     summary TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
@@ -174,6 +196,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
 `);
 
+if (upgrading && db.prepare("PRAGMA table_info(products)").all().some(c => c.name === "amount")) {
+  db.exec("INSERT INTO product_variants (product_id, color, size, amount) SELECT id, '', '', amount FROM products");
+  db.exec("ALTER TABLE products DROP COLUMN amount");
+}
+if (!db.prepare("PRAGMA table_info(order_items)").all().some(c => c.name === "variant_id")) {
+  db.exec("ALTER TABLE order_items ADD COLUMN variant_id INTEGER REFERENCES product_variants(id) ON DELETE SET NULL");
+  db.exec(`UPDATE order_items SET variant_id =
+             (SELECT id FROM product_variants WHERE product_id = order_items.product_id ORDER BY id LIMIT 1)
+           WHERE product_id IS NOT NULL`);
+}
+
 // ---------- default accounts ----------
 const addUser = db.prepare("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)");
 addUser.run("customer1",  bcrypt.hashSync("cust123", 10),  "customer");
@@ -182,10 +215,21 @@ addUser.run("warehouse1", bcrypt.hashSync("ware123", 10),  "warehouse");
 
 // ---------- default products ----------
 const addProduct = db.prepare(
-  "INSERT OR IGNORE INTO products (name, description, price, amount, category) VALUES (?, ?, ?, ?, ?)"
+  "INSERT OR IGNORE INTO products (name, description, price, category) VALUES (?, ?, ?, ?)"
 );
-addProduct.run("Sugardoll Baby Tee", "Baby Tee Short-sleeve Crop top", 180, 100, "tops");
-addProduct.run("Zara Slouchy Jeans", "Trendy jeans", 450, 100, "jeans");
-addProduct.run("Sugardoll Lottie Pants", "Unique and Trendy pants", 229, 100, "trousers");
+const addVariant = db.prepare("INSERT INTO product_variants (product_id, color, size, amount) VALUES (?, ?, ?, ?)");
 
-console.log("Database is ready.");
+function seed(name, description, price, category, variants) {
+  addProduct.run(name, description, price, category);
+  const p = db.prepare("SELECT id FROM products WHERE name = ?").get(name);
+  if (!db.prepare("SELECT 1 FROM product_variants WHERE product_id = ?").get(p.id)) {
+    variants.forEach(([color, size, amount]) => addVariant.run(p.id, color, size, amount));
+  }
+}
+
+seed("Sugardoll Baby Tee", "Baby Tee Short-sleeve Crop top", 180, "tops",
+  [["Brown", "S", 30], ["Brown", "M", 40], ["White", "S", 30]]);
+seed("Zara Slouchy Jeans", "Trendy jeans", 450, "jeans",
+  [["Blue", "28", 30], ["Blue", "30", 40], ["Blue", "32", 30]]);
+seed("Sugardoll Lottie Pants", "Unique and Trendy pants", 229, "trousers",
+  [["Brown", "S", 30], ["Brown", "M", 40], ["Brown", "L", 30]]);

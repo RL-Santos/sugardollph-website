@@ -5,6 +5,7 @@ let currentProduct = null;
 let images = [];
 let imgIndex = 0;
 let returnTo = "/"; // where to go after logging in
+let selColor = "", selSize = "";   // the color and size picked on the product page
 
 // Shows a popup in the bottom right corner for a few seconds
 function showToast(text, type) {
@@ -121,7 +122,9 @@ function renderProducts() {
   const list = document.getElementById("product-list");
   list.innerHTML = "";
   if (products.length === 0) {
-    list.textContent = "No products found.";
+    list.textContent = document.getElementById("category").value === "favorites"
+      ? "You have no favorites yet. Open a product and tap \"Add to favorites\"."
+      : "No products found.";
     return;
   }
   products.forEach(p => {
@@ -178,6 +181,8 @@ function navigate(url) {
 // Looks at the current link and shows the matching page
 function route() {
   const path = location.pathname;
+  document.body.classList.toggle("shop-home", path === "/" || path === "/search" || path.startsWith("/product/"));
+
   const onAuthPage = path === "/login" || path === "/register" || path === "/forgot-password";
 
   // Logged-in people have no reason to see the login page
@@ -212,6 +217,8 @@ function route() {
   }
 
   const isSearch = path === "/search";
+  if (isSearch && params.get("category") === "favorites" && !currentUser) return goLogin();
+
   document.getElementById("search").value = isSearch ? (params.get("q") || "") : "";
   document.getElementById("category").value = isSearch ? (params.get("category") || "") : "";
   document.getElementById("product-page").hidden = true;
@@ -227,6 +234,55 @@ function doSearch() {
   if (q) params.set("q", q);
   if (category) params.set("category", category);
   navigate("/search?" + params);
+}
+
+function pickedVariant() {
+  return currentProduct.variants.find(v => v.color === selColor && v.size === selSize) || null;
+}
+
+// Shows the stock of the chosen variation and updates the Add to cart button
+function showVariant() {
+  const v = pickedVariant();
+  const out = !v || v.amount <= 0;
+  document.getElementById("product-stock").textContent = "Stock: " + (v ? v.amount : 0);
+  const addBtn = document.getElementById("detail-add-btn");
+  addBtn.disabled = out;
+  addBtn.textContent = out ? "Out of stock" : !currentUser ? "Log in to add to cart" : "Add to cart";
+}
+
+// Color and size buttons. Only the groups the product actually has are shown.
+function renderVariants() {
+  const box = document.getElementById("variant-box");
+  box.innerHTML = "";
+  const vs = currentProduct.variants;
+  [["Color", "color"], ["Size", "size"]].forEach(([title, key]) => {
+    const values = [...new Set(vs.map(v => v[key]).filter(Boolean))];
+    if (values.length === 0) return;
+    const row = document.createElement("div");
+    row.className = "variant-row";
+    const heading = document.createElement("b");
+    heading.textContent = title;
+    row.appendChild(heading);
+    values.forEach(value => {
+      const chip = document.createElement("button");
+      const chosen = (key === "color" ? selColor : selSize) === value;
+      const inStock = vs.some(v => v[key] === value && v.amount > 0);
+      chip.className = "variant-chip" + (chosen ? " on" : "") + (inStock ? "" : " off");
+      chip.textContent = value;
+      chip.onclick = () => {
+        if (key === "color") selColor = value; else selSize = value;
+        if (!pickedVariant()) { // that mix doesn't exist, so move the other choice to one that does
+          const fit = vs.find(v => v[key] === value);
+          selColor = fit.color;
+          selSize = fit.size;
+        }
+        renderVariants();
+        showVariant();
+      };
+      row.appendChild(chip);
+    });
+    box.appendChild(row);
+  });
 }
 
 async function showProductPage(slug) {
@@ -246,15 +302,21 @@ async function showProductPage(slug) {
   document.getElementById("product-stock").textContent = "Stock: " + currentProduct.amount;
   document.getElementById("product-price").textContent = "PHP " + currentProduct.price;
 
-  const addBtn = document.getElementById("detail-add-btn");
-  addBtn.disabled = currentProduct.amount <= 0;
-  if (currentProduct.amount <= 0) addBtn.textContent = "Out of stock";
-  else if (!currentUser) addBtn.textContent = "Log in to add to cart";
-  else addBtn.textContent = "Add to cart";
-
+  const first = currentProduct.variants.find(v => v.amount > 0) || currentProduct.variants[0];
+  selColor = first ? first.color : "";
+  selSize = first ? first.size : "";
+  renderVariants();
+  showVariant();
+  updateFavButton();
   renderImage();
   document.getElementById("customer-view").hidden = true;
   document.getElementById("product-page").hidden = false;
+}
+
+function updateFavButton() {
+  const btn = document.getElementById("fav-btn");
+  btn.textContent = currentProduct.favorite ? "\u2665 In your favorites" : "\u2661 Add to favorites";
+  btn.classList.toggle("on", !!currentProduct.favorite);
 }
 
 // Back goes to the page you came from. If the product link was opened directly, it goes to the shop.
@@ -405,7 +467,7 @@ function renderCart() {
     info.className = "cart-info";
 
     const name = document.createElement("b");
-    name.textContent = item.name;
+    name.textContent = item.name + (item.label ? " (" + item.label + ")" : "");
 
     const price = document.createElement("span");
     price.textContent = "PHP " + item.price;
@@ -550,10 +612,21 @@ document.querySelectorAll(".account-nav a").forEach(a =>
   })
 );
 document.getElementById("detail-add-btn").addEventListener("click", async () => {
-  if (await addToCart(currentProduct)) showToast("Added to cart.", "success");
+  const v = pickedVariant();
+  if (!v) return;
+  if (await addToCart(v)) showToast("Added to cart.", "success");
 });
 document.getElementById("search").addEventListener("keydown", e => {
   if (e.key === "Enter") doSearch();
+});
+document.getElementById("fav-btn").addEventListener("click", async () => {
+  if (!currentUser) return goLogin();
+  const on = !currentProduct.favorite;
+  const data = await send(on ? "PUT" : "DELETE", "/api/favorites/" + currentProduct.id, on ? {} : undefined);
+  if (!data) return;
+  currentProduct.favorite = on;
+  updateFavButton();
+  showToast(on ? "Added to favorites." : "Removed from favorites.", "success");
 });
 
 // Browser back/forward buttons
@@ -867,20 +940,20 @@ async function renderPassword(box) {
   );
 }
 
-async function renderDelete(box) {
+async function renderDeactivate(box) {
   const warn = document.createElement("p");
-  warn.textContent = "This permanently deletes your account, saved details and cart. This can't be undone.";
+  warn.textContent = "Your account will be deactivated and you'll be logged out. You won't be able to log in again unless the shop reactivates it. Your orders are kept.";
   box.append(
-    makeHeading("Delete account"),
+    makeHeading("Deactivate account"),
     warn,
     makeField("Enter your password to confirm", "del-password", "", "password"),
-    makeButton("Delete my account", async () => {
-      if (!(await confirmAction("Delete your account for good?", "Delete"))) return;
-      const data = await send("DELETE", "/api/account", { password: val("del-password") });
+    makeButton("Deactivate my account", async () => {
+      if (!(await confirmAction("Deactivate your account?", "Deactivate"))) return;
+      const data = await send("PUT", "/api/account/deactivate", { password: val("del-password") });
       if (data) {
         applyUser(null);
         navigate("/");
-        showToast("Your account was deleted.", "success");
+        showToast("Your account was deactivated.", "success");
       }
     }, "danger-btn")
   );
@@ -907,6 +980,15 @@ const CANCEL_REASONS = [
   "Wrong size, color or item",
   "Want to change the delivery address",
   "Found a cheaper price elsewhere",
+  "Changed my mind",
+  "Others"
+];
+
+const RETURN_REASONS = [
+  "Wrong size",
+  "Item doesn't match the photos or description",
+  "Item is damaged or defective",
+  "Received the wrong item",
   "Changed my mind",
   "Others"
 ];
@@ -1078,9 +1160,9 @@ function renderOrderList(box, title, orders, emptyText) {
     }
 
     if (o.can_return) {
-      const proof = o.payment_method !== "COD" ? makeProofField() : null; // online payments only
+      const proof = o.payment_method !== "COD" ? makeProofField() : null;
       const btn = makeButton("Return this order", () =>
-        askReason(card, btn, "Why are you returning it?", "Send return request", async reason => {
+        askReason(card, btn, "Tell us your reason", "Send return request", async reason => {
           const fd = new FormData();
           fd.append("reason", reason);
           const file = proof && proof.querySelector("input").files[0];
@@ -1090,7 +1172,7 @@ function renderOrderList(box, title, orders, emptyText) {
           if (!res.ok) return showToast(data.error || "Something went wrong.", "error");
           showToast("Return requested. We'll notify you once it's reviewed.", "success");
           navigate("/purchases/returns");
-        }, null, proof), "secondary-btn");
+        }, RETURN_REASONS, proof), "secondary-btn");
       card.appendChild(btn);
     }
     box.appendChild(card);
@@ -1117,7 +1199,7 @@ async function renderStatus(box) {
 const SECTIONS = {
   account: {
     profile: renderProfile, payment: renderPayment, addresses: renderAddresses,
-    password: renderPassword, delete: renderDelete
+    password: renderPassword, deactivate: renderDeactivate
   },
   purchases: { status: renderStatus, history: renderHistory, returns: renderReturns }
 };

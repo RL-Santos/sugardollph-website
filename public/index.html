@@ -13,7 +13,7 @@
 <div id="login-page" class="split" hidden>
   <div class="split-left">
     <div class="auth-box">
-    <img class="logo" id="login-logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+    <img class="logo" id="login-logo" src="/images/sugardollLogo-no-bg.png" alt="Sugardoll logo">
       <h2>Log in to your account</h2>
       <label class="field">Username
         <input type="text" id="username" placeholder="Enter your username">
@@ -34,7 +34,7 @@
 <div id="register-page" class="split" hidden>
   <div class="split-left">
     <div class="auth-box">
-      <img class="logo" id="login-logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+      <img class="logo" id="login-logo" src="/images/sugardollLogo-no-bg.png" alt="Sugardoll logo">
       <h2>Create an account</h2>
       <label class="field">First name
         <input type="text" id="reg-first">
@@ -100,7 +100,7 @@
 <div id="forgot-page" class="split" hidden>
   <div class="split-left">
     <div class="auth-box">
-      <img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo">
+      <img class="logo" src="/images/sugardollLogo-no-bg.png" alt="Sugardoll logo">
       <h2>Reset your password</h2>
       <p class="hint">Enter your username and the email and mobile number saved on your account.</p>
       <label class="field">Username
@@ -149,10 +149,11 @@
   </div>
 
   <div class="topbar">
-    <a href="/" class="logo-link"><img class="logo" src="/images/sugardollLogo.jpg" alt="Sugardoll logo"></a>
+    <a href="/" class="logo-link"><img class="logo" src="/images/sugardollLogo-no-bg.png" alt="Sugardoll logo"></a>
     <input type="text" id="search" placeholder="Search products">
     <select id="category">
       <option value="">All</option>
+      <option value="favorites">Favorites</option>
       <option value="jeans">Jeans</option>
       <option value="trousers">Trousers</option>
       <option value="tops">Tops</option>
@@ -189,7 +190,9 @@
           <span id="product-stock"></span>
         </p>
         <p id="product-desc"></p>
+        <div id="variant-box"></div>
         <button id="detail-add-btn" class="primary-btn">Add to cart</button>
+        <button id="fav-btn" class="secondary-btn">&#9825; Add to favorites</button>
       </div>
     </div>
   </div>
@@ -202,7 +205,7 @@
         <a href="/account/payment">Payment info</a>
         <a href="/account/addresses">Addresses</a>
         <a href="/account/password">Change password</a>
-        <a href="/account/delete">Delete account</a>
+        <a href="/account/deactivate">Deactivate account</a>
         <h3>Purchases</h3>
         <a href="/purchases/status">Order status</a>
         <a href="/purchases/history">Order history</a>

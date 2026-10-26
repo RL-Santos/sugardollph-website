@@ -92,6 +92,7 @@ table.items th, table.items td { padding: 10px 12px; text-align: left; border-bo
 .badge.shipped { background: #988780; color: #3A2D28; }
 .badge.delivered, .badge.order { background: #3A2D28; color: #F1EDE6; }
 .badge.cancelled, .badge.returned { background: #fde4e8; color: #b00020; }
+.badge.chat { background: #D1C7BD; color: #3A2D28; }
 
 .admin .chat-log { flex: none; height: 55vh; padding: 12px; margin: 12px 0; border: 1px solid #D1C7BD; border-radius: 12px; background: #fff; }
 .admin .chat-note { margin-bottom: 12px; }
@@ -180,3 +181,7 @@ table.data td input[type=text] { width: 160px; }
 .reason + .reason { margin-top: 8px; }
 .reason small { display: block; color: #988780; }
 .reason span { overflow-wrap: anywhere; }
+
+.variants { margin-bottom: 8px; }
+.variant-edit { display: grid; grid-template-columns: 1fr 1fr 90px auto; gap: 8px; margin-bottom: 8px; }
+.variant-edit input { min-width: 0; padding: 8px 10px; border: 1px solid #CBAD8D; border-radius: 8px; background: #F1EDE6; font: inherit; }

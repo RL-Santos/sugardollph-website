@@ -69,7 +69,7 @@ async function openCheckout() {
     checkoutOverlay.hidden = true;
     cartOverlay.hidden = true;
     await loadCart();
-    showToast("Order placed. Waiting for approval.", "success");
+    showToast(data.status === "pending" ? "Order placed. Waiting for approval." : "Order placed. We're preparing it now.", "success");
     navigate("/purchases/status");
   });
 
